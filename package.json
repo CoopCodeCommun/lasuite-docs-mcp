@@ -1,0 +1,37 @@
+{
+  "name": "lasuite-docs-mcp",
+  "version": "0.1.0",
+  "description": "MCP server pour lire et éditer des documents la-suite Docs / MCP server to read and edit la-suite Docs documents",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "lasuite-docs-mcp": "./dist/server.js"
+  },
+  "main": "./dist/server.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/server.js",
+    "dev": "tsx src/server.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "tsx tests/integration.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@hocuspocus/provider": "^2.13.5",
+    "yjs": "^13.6.18",
+    "ws": "^8.18.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "@types/ws": "^8.5.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.5.0",
+    "vitest": "^2.0.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
