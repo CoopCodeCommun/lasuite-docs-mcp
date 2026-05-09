@@ -27,6 +27,7 @@ import * as Y from 'yjs';
 import { createDocsWebSocketClass } from './connection.js';
 import { DocsError } from '../types.js';
 import type { DocumentId } from '../types.js';
+import type { CredentialsStore } from '../auth/credentials.js';
 
 /**
  * Représentation interne d'une session Yjs ouverte.
@@ -54,8 +55,12 @@ export class SessionManager {
     private readonly docsInstanceUrl: string,
     private readonly sessionTtlMs: number,
     private readonly syncTimeoutMs: number,
+    credentialsStore?: CredentialsStore,
   ) {
-    this.docsWebSocketClass = createDocsWebSocketClass(docsInstanceUrl);
+    this.docsWebSocketClass = createDocsWebSocketClass(
+      docsInstanceUrl,
+      credentialsStore,
+    );
     // Lance le GC toutes les 60 secondes pour fermer les sessions inactives.
     // / Run GC every 60s to close inactive sessions.
     this.garbageCollectionInterval = setInterval(() => {

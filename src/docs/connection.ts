@@ -6,60 +6,65 @@
  *
  * LOCALISATION : src/docs/connection.ts
  *
+ * v0.2 : si CredentialsStore.has() au moment de la connexion, on envoie
+ * les vrais cookies de l'utilisateur (docs_sessionid + csrftoken). Sinon,
+ * cookie bidon comme en v0.1 (suffisant pour les docs publics).
+ *
  * Le serveur de collaboration de Docs (`y-provider`) impose deux contrôles
- * au handshake WebSocket (cf. src/middlewares.ts du repo Docs) :
+ * au handshake WebSocket :
  *   1. Header `Origin` doit valoir l'URL de l'instance.
  *   2. Header `Cookie` doit être présent (n'importe quelle valeur suffit
  *      pour les docs publics).
- *
- * Sans ces deux conditions, le serveur ferme avec :
- *   - 4001 "Origin not allowed", ou
- *   - 4001 "No cookies".
- *
- * En plus, ce wrapper est nécessaire car HocuspocusProviderWebsocket
- * appelle `new WebSocketPolyfill(this.url)` avec un seul argument, sans
- * forwarder d'options. Toute personnalisation des en-têtes doit donc
- * passer par une sous-classe de ws.
  *
  * COMMUNICATION :
  * Importé par : session.ts (pour fournir le polyfill au HocuspocusProviderWebsocket).
  */
 
 import WebSocketBase from 'ws';
+import type { CredentialsStore } from '../auth/credentials.js';
+
+const ANONYMOUS_COOKIE = 'docs_sessionid=anonymous-bot';
+
+/**
+ * Construit le header Cookie à envoyer au serveur Hocuspocus.
+ * Si des credentials utilisateur sont en mémoire, les utilise.
+ * Sinon, utilise un cookie bidon (suffisant pour les docs publics).
+ * / Builds the Cookie header. Uses real user credentials if available,
+ * / falls back to a dummy cookie otherwise.
+ */
+function buildCookieHeader(credentialsStore?: CredentialsStore): string {
+  if (credentialsStore && credentialsStore.has()) {
+    const credentials = credentialsStore.get()!;
+    return `docs_sessionid=${credentials.docs_sessionid}; csrftoken=${credentials.csrftoken}`;
+  }
+  return ANONYMOUS_COOKIE;
+}
 
 /**
  * Crée une classe DocsWebSocket configurée pour une instance Docs donnée.
  * / Creates a DocsWebSocket class configured for a given Docs instance.
  *
- * On retourne une classe (pas une instance) car HocuspocusProviderWebsocket
- * attend une référence de constructeur dans son option `WebSocketPolyfill`.
- * / We return a class (not an instance) because HocuspocusProviderWebsocket
- * expects a constructor reference in its `WebSocketPolyfill` option.
- *
- * @param docsInstanceUrl - URL HTTPS de l'instance Docs (ex: https://notes.liiib.re)
- * @returns Une sous-classe de ws.WebSocket prête à être passée à Hocuspocus
+ * @param docsInstanceUrl - URL HTTPS de l'instance Docs
+ * @param credentialsStore - optionnel ; si fourni, ses credentials seront
+ *                           utilisés à chaque ouverture de connexion. Si
+ *                           absent ou vide, on utilise un cookie bidon.
  */
 export function createDocsWebSocketClass(
   docsInstanceUrl: string,
+  credentialsStore?: CredentialsStore,
 ): typeof WebSocketBase {
-  // Dérive l'origin attendue par le serveur Hocuspocus.
-  // / Derive the Origin expected by the Hocuspocus server.
   const expectedOrigin = new URL(docsInstanceUrl).origin;
-
-  // Cookie bidon : suffit pour les docs publics (le serveur exige juste
-  // *un* cookie, mais ne valide pas son contenu pour les docs publics).
-  // / Dummy cookie: sufficient for public docs.
-  const dummyCookie = 'docs_sessionid=anonymous-bot';
 
   class DocsWebSocket extends WebSocketBase {
     constructor(address: string | URL, protocols?: string | string[] | Record<string, unknown>) {
-      // Call parent with expanded options including origin and cookie headers
+      // Le cookie est calculé À CHAQUE construction, pour prendre en compte
+      // un set/clear récent de credentials sans avoir à recréer la classe.
+      // / Cookie computed on each construction to honor recent set/clear.
       super(address, protocols as string | string[] | undefined, {
         origin: expectedOrigin,
         headers: {
-          Cookie: dummyCookie,
+          Cookie: buildCookieHeader(credentialsStore),
         },
-        // Spread any additional options passed in (if it's options, not protocols)
         ...(typeof protocols === 'object' && !Array.isArray(protocols) ? protocols : {}),
       });
     }

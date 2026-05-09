@@ -247,7 +247,46 @@ Le plus dangereux : ce bug **ne casse pas** le typecheck (Yjs déclare le retour
 
 ---
 
-## 6. Conventions de code
+## 6. Authentification utilisateur (v0.2)
+
+### 6.1. Pourquoi cookies + CSRF (et pas Bearer / OIDC)
+
+La-suite Docs expose une API Django protégée par le mécanisme de session standard de Django : cookie `docs_sessionid` (identifiant de session HttpOnly) + token CSRF (`csrftoken`, lisible par le navigateur). Il n'existe pas de flux OIDC ni de token Bearer applicatif exposé aux clients tiers. L'agent MCP doit donc s'authentifier exactement comme un navigateur : en présentant les deux cookies. Voir la spec v0.2 §1 pour le détail des contraintes.
+
+### 6.2. Les deux stores en mémoire
+
+Deux singletons sont instanciés dans `server.ts` au démarrage et propagés aux couches réseau :
+
+- **`CredentialsStore`** (`src/auth/credentials.ts`) : stocke le couple `{docs_sessionid, csrftoken}`. Champ privé `#current`, jamais exposé directement. Les overrides `toString` / `[nodejs.util.inspect.custom]` / `toJSON` renvoient `[CredentialsStore: set]` ou `[CredentialsStore: empty]` pour prévenir toute fuite accidentelle via `console.log` ou `JSON.stringify`.
+
+- **`InstanceStore`** (`src/auth/instance.ts`) : stocke l'origin HTTPS de l'instance active (ex: `https://notes.liiib.re`). Peut être initialisé depuis `DOCS_INSTANCE_URL` au démarrage (compat v0.1), ou settled dynamiquement au premier appel avec un `doc_url`. Jamais switché silencieusement : un mismatch lève `INSTANCE_MISMATCH`.
+
+Les deux stores ne sont **jamais persistés** sur disque, jamais inclus dans les réponses MCP.
+
+### 6.3. Les 4 headers obligatoires sur les opérations d'écriture
+
+Toute requête REST d'écriture (POST, PATCH, DELETE) vers l'API Django nécessite exactement 4 headers, construits par `DocsRestClient.buildAuthHeaders()` :
+
+| Header | Valeur |
+|---|---|
+| `Cookie` | `docs_sessionid=<valeur>; csrftoken=<valeur>` |
+| `Content-Type` | `application/json` |
+| `Referer` | `<origin>/` |
+| `X-CSRFToken` | `<csrftoken>` |
+
+Le `Referer` est requis par le middleware CSRF de Django (il vérifie que l'origine de la requête correspond à l'instance). `X-CSRFToken` est le mécanisme de protection CSRF standard de Django Rest Framework.
+
+### 6.4. `InstanceStore.matches()` comme point de contrôle anti cross-instance
+
+Avant de construire les headers d'auth, `buildAuthHeaders()` vérifie que l'URL cible a la même origine que l'instance settled via `instanceStore.matches(targetUrl)`. Si ce n'est pas le cas, on lève `INSTANCE_MISMATCH` plutôt que d'envoyer les cookies de l'utilisateur vers un serveur inattendu. C'est la principale protection contre les attaques de type "agent redirigé vers une instance hostile".
+
+### 6.5. Détection dynamique de l'instance depuis les liens
+
+`parseDocsUrl()` (`src/auth/instance.ts`) extrait l'origin et l'UUID d'un lien Docs complet (ex: `https://notes.liiib.re/docs/<UUID>/`). Quand un tool reçoit un `doc_url`, `resolveDocumentReference()` dans `server.ts` appelle `parseDocsUrl`, settle l'instance si elle ne l'est pas encore, et retourne l'UUID nu. Avantage : l'utilisateur n'a pas à configurer `DOCS_INSTANCE_URL` — il partage simplement un lien complet vers un document.
+
+---
+
+## 7. Conventions de code
 
 Le projet suit le style **FALC** (Facile A Lire et Comprendre), inspiré du skill `djc` adapté au contexte Node/TypeScript :
 
@@ -263,7 +302,7 @@ Pourquoi ces règles ? Pour que le code reste lisible par un développeur qui n'
 
 ---
 
-## 7. Comment ce projet a été construit
+## 8. Comment ce projet a été construit
 
 Ce projet a été construit en une session avec [Claude Code](https://docs.claude.com/en/docs/claude-code) en suivant le framework [Superpowers](https://github.com/anthropics/skills) :
 
@@ -282,14 +321,15 @@ Elle a aussi mis en évidence des limites à connaître : un piège technique r�
 
 ---
 
-## 8. Pour aller plus loin
+## 9. Pour aller plus loin
 
 **Ressources internes :**
 - [`README.md`](../README.md) — install, configuration, usage avec Claude Desktop
 - [`CHANGELOG.md`](../CHANGELOG.md) — historique des versions
 - [`A TESTER ET DOCUMENTER/`](../A%20TESTER%20ET%20DOCUMENTER/) — scénarios de test manuel par feature
-- [`docs/superpowers/specs/2026-05-08-docs-mcp-design.md`](superpowers/specs/2026-05-08-docs-mcp-design.md) — spec validée
-- [`docs/superpowers/plans/2026-05-08-docs-mcp-implementation.md`](superpowers/plans/2026-05-08-docs-mcp-implementation.md) — plan d'implémentation
+- [`docs/superpowers/specs/2026-05-08-docs-mcp-design.md`](superpowers/specs/2026-05-08-docs-mcp-design.md) — spec validée v0.1
+- [`docs/superpowers/plans/2026-05-08-docs-mcp-implementation.md`](superpowers/plans/2026-05-08-docs-mcp-implementation.md) — plan d'implémentation v0.1
+- [`docs/superpowers/plans/2026-05-08-docs-mcp-v0.2-implementation.md`](superpowers/plans/2026-05-08-docs-mcp-v0.2-implementation.md) — plan d'implémentation v0.2 (auth + arborescence)
 
 **Ressources externes :**
 - [la-suite Docs](https://github.com/suitenumerique/docs) — l'éditeur cible

@@ -47,6 +47,9 @@ export interface DocumentSummary {
 export type DocsErrorCode =
   | 'DOC_NOT_FOUND'
   | 'DOC_NOT_PUBLIC'
+  | 'AUTH_REQUIRED'
+  | 'INSTANCE_NOT_SET'
+  | 'INSTANCE_MISMATCH'
   | 'DOC_READONLY'
   | 'BLOCK_NOT_FOUND'
   | 'UNSUPPORTED_BLOCK_TYPE'
