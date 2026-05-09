@@ -88,24 +88,91 @@ Les tools de gestion de l'arborescence (`create_document`, `delete_document`, et
 
 Les credentials expirent ~12h après la connexion. Ils sont stockés **uniquement en mémoire** (jamais écrits sur disque, jamais inclus dans les réponses des tools).
 
-## Usage avec Claude Desktop
+## Installation dans un client MCP
 
-Dans `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) ou équivalent :
+Remplace `/chemin/absolu/vers/lasuite-docs-mcp` par le chemin réel sur ta machine. `DOCS_INSTANCE_URL` est optionnelle (cf. section [Configuration](#configuration)).
+
+### Claude Code (CLI Anthropic)
+
+Le plus rapide, via la commande CLI :
+
+```bash
+# Disponible dans toutes tes sessions (recommandé pour un usage personnel)
+claude mcp add --transport stdio --scope user lasuite-docs \
+  -- node /chemin/absolu/vers/lasuite-docs-mcp/dist/server.js
+
+# Avec une instance par défaut
+claude mcp add --transport stdio --scope user \
+  --env DOCS_INSTANCE_URL=https://notes.liiib.re \
+  lasuite-docs -- node /chemin/absolu/vers/lasuite-docs-mcp/dist/server.js
+
+# Limité à un projet précis (créera .mcp.json à la racine du projet)
+claude mcp add --transport stdio --scope project lasuite-docs \
+  -- node /chemin/absolu/vers/lasuite-docs-mcp/dist/server.js
+```
+
+Ou directement en JSON dans `~/.claude.json` (user) ou `.mcp.json` (project) :
+
+```json
+{
+  "mcpServers": {
+    "lasuite-docs": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["/chemin/absolu/vers/lasuite-docs-mcp/dist/server.js"],
+      "env": {
+        "DOCS_INSTANCE_URL": "https://notes.liiib.re"
+      }
+    }
+  }
+}
+```
+
+### Claude Desktop
+
+Dans `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS), `%APPDATA%\Claude\claude_desktop_config.json` (Windows), ou équivalent Linux :
 
 ```json
 {
   "mcpServers": {
     "lasuite-docs": {
       "command": "node",
-      "args": ["/chemin/absolu/vers/lasuite-docs-mcp/dist/server.js"]
+      "args": ["/chemin/absolu/vers/lasuite-docs-mcp/dist/server.js"],
+      "env": {
+        "DOCS_INSTANCE_URL": "https://notes.liiib.re"
+      }
     }
   }
 }
 ```
 
-`DOCS_INSTANCE_URL` est optionnelle : si elle n'est pas définie, l'instance est détectée au premier appel avec un `doc_url`. Pour forcer une instance dès le démarrage (ex: `"https://notes.liiib.re"`), ajouter la clé `"env": {"DOCS_INSTANCE_URL": "https://notes.liiib.re"}`.
+Redémarre Claude Desktop pour que la modif soit prise en compte.
 
-Redémarre Claude Desktop, et tu peux demander : « Lis le doc `<lien complet>` et insère un paragraphe au milieu ».
+### OpenCode
+
+Dans `~/.config/opencode/opencode.json` (user) ou `./opencode.json` (project) :
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "lasuite-docs": {
+      "type": "local",
+      "command": ["node", "/chemin/absolu/vers/lasuite-docs-mcp/dist/server.js"],
+      "enabled": true,
+      "environment": {
+        "DOCS_INSTANCE_URL": "https://notes.liiib.re"
+      }
+    }
+  }
+}
+```
+
+Note : OpenCode utilise `command` comme tableau (pas `command` + `args` séparés) et `environment` (pas `env`).
+
+### Premier usage
+
+Une fois l'installation faite et le client redémarré, tu peux demander à l'agent : « Lis le doc `https://notes.liiib.re/docs/<UUID>/` et insère un paragraphe au milieu » — l'instance est extraite automatiquement du lien.
 
 ## Tests
 
