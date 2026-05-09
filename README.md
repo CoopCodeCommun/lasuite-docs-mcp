@@ -4,7 +4,7 @@ Serveur **Model Context Protocol (MCP)** qui permet à un agent IA de lire et d'
 
 ## Statut
 
-v0.2.0 — authentification utilisateur (cookies de session Django + CSRF) et détection dynamique de l'instance à partir des liens. 14 tools : lecture, édition de contenu, gestion de l'arborescence, authentification.
+v0.2.0 — authentification utilisateur (cookies de session Django + CSRF) et détection dynamique de l'instance à partir des liens. **16 tools** : lecture (incluant l'arborescence des descendants), édition de contenu, gestion de l'arborescence, authentification.
 
 ## Tools MCP exposés
 
@@ -15,6 +15,8 @@ v0.2.0 — authentification utilisateur (cookies de session Django + CSRF) et d�
 | `list_documents` | Liste les docs publics de l'instance |
 | `read_document` | Lit la liste structurée des paragraphes/headings |
 | `get_document_metadata` | Récupère les métadonnées (titre, dates, accès) |
+| `list_document_children` | Enfants directs d'un document (1 niveau) |
+| `list_document_descendants` | Tous les descendants à plat (récursif, `max_depth` borné). Sans parent → tous les docs accessibles à l'utilisateur. |
 
 ### Édition de contenu
 
@@ -59,7 +61,7 @@ Vérification rapide après build :
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node dist/server.js | head -c 300
 ```
 
-Doit retourner un JSON-RPC listant les 14 tools.
+Doit retourner un JSON-RPC listant les 16 tools.
 
 ## Configuration
 

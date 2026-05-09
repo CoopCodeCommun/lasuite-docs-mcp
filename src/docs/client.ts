@@ -188,6 +188,115 @@ export class DocsRestClient {
   }
 
   // -----------------------------------------------------------------
+  // Lecture d'arborescence (anonyme ou authentifiée selon visibilité)
+  // / Tree reading (anonymous or authenticated depending on doc visibility)
+  // -----------------------------------------------------------------
+
+  /**
+   * Liste les enfants directs d'un document.
+   * Marche en anonyme si le parent et les enfants sont publics.
+   * Si CredentialsStore.has(), envoie le cookie pour voir aussi les enfants
+   * privés accessibles à l'utilisateur connecté.
+   * / Lists direct children of a document. Works anonymously for public docs,
+   * / authenticated if credentials present.
+   */
+  async listDocumentChildren(
+    parentDocumentId: DocumentId,
+  ): Promise<DocumentSummary[]> {
+    const baseUrl = this.requireInstanceOrThrow();
+    const url = `${baseUrl}/api/v1.0/documents/${parentDocumentId}/children/?page_size=100`;
+    const response = await this.requestPossiblyAuth(url);
+    if (response.status === 404) {
+      throw new DocsError(
+        'DOC_NOT_FOUND',
+        `Parent document ${parentDocumentId} not found`,
+      );
+    }
+    if (!response.ok) {
+      throw new Error(
+        `Unexpected response ${response.status} when listing children of ${parentDocumentId}`,
+      );
+    }
+    const body = (await response.json()) as { results: DocumentSummary[] };
+    return body.results;
+  }
+
+  /**
+   * Liste tous les descendants d'un document (récursif côté MCP via children).
+   * Si parentDocumentId est null, retourne tous les docs accessibles à
+   * l'utilisateur connecté à plat (équivalent /documents/all/).
+   * maxDepth borne la récursion pour éviter les surprises sur des arbres profonds.
+   * / Lists all descendants of a document (recursive via children) or all
+   * / accessible docs if parent is null. maxDepth caps recursion depth.
+   */
+  async listDocumentDescendants(
+    parentDocumentId: DocumentId | null,
+    maxDepth: number,
+  ): Promise<DocumentSummary[]> {
+    if (parentDocumentId === null) {
+      return this.listAllAccessibleDocuments();
+    }
+
+    // Récursion côté client : pile (DFS) avec borne de profondeur.
+    // Chaque niveau = 1 appel HTTP /children/. OK pour des arbres modestes ;
+    // pour 100+ docs, l'agent paie en latence — assumé.
+    // / Client-side recursion via DFS stack with depth cap.
+    const collected: DocumentSummary[] = [];
+    const explorationStack: Array<{ id: DocumentId; depthFromRoot: number }> = [
+      { id: parentDocumentId, depthFromRoot: 0 },
+    ];
+
+    while (explorationStack.length > 0) {
+      const current = explorationStack.pop()!;
+      if (current.depthFromRoot >= maxDepth) {
+        continue;
+      }
+      const directChildren = await this.listDocumentChildren(current.id);
+      for (const child of directChildren) {
+        collected.push(child);
+        explorationStack.push({
+          id: child.id,
+          depthFromRoot: current.depthFromRoot + 1,
+        });
+      }
+    }
+    return collected;
+  }
+
+  /**
+   * Liste tous les docs accessibles à l'utilisateur connecté + leurs descendants.
+   * Utilise GET /documents/all/ qui inclut déjà les descendants à plat.
+   * Sans credentials, ne retourne que les docs publics du user (peu utile).
+   * / Uses GET /documents/all/ which already returns descendants flat.
+   */
+  private async listAllAccessibleDocuments(): Promise<DocumentSummary[]> {
+    const baseUrl = this.requireInstanceOrThrow();
+    const url = `${baseUrl}/api/v1.0/documents/all/?page_size=100`;
+    const response = await this.requestPossiblyAuth(url);
+    if (!response.ok) {
+      throw new Error(
+        `Unexpected response ${response.status} when listing all accessible documents`,
+      );
+    }
+    const body = (await response.json()) as { results: DocumentSummary[] };
+    return body.results;
+  }
+
+  /**
+   * GET avec credentials si disponibles, sinon anonyme.
+   * Différent de requestWithAuth (qui exige les credentials).
+   * / GET with credentials if available, anonymous otherwise.
+   */
+  private async requestPossiblyAuth(targetUrl: string): Promise<Response> {
+    const headers: Record<string, string> = {};
+    if (this.credentialsStore.has() && this.instanceStore.matches(targetUrl)) {
+      const credentials = this.credentialsStore.get()!;
+      headers.Cookie = `docs_sessionid=${credentials.docs_sessionid}; csrftoken=${credentials.csrftoken}`;
+    }
+    return fetch(targetUrl, { method: 'GET', headers });
+  }
+
+  // -----------------------------------------------------------------
   // Helpers privés
   // / Private helpers
   // -----------------------------------------------------------------
