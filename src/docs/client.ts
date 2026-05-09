@@ -45,18 +45,41 @@ export class DocsRestClient {
   // / Read methods (anonymous — v0.1 behavior preserved)
   // -----------------------------------------------------------------
 
+  /**
+   * Récupère les métadonnées d'un document.
+   * v0.3.1 : utilise les credentials si présents (sinon GET anonyme).
+   * Permet d'accéder aux docs privés authentifiés.
+   * / v0.3.1: uses credentials if present (anonymous GET otherwise).
+   */
   async fetchDocumentMetadata(
     documentIdentifier: DocumentId,
-  ): Promise<DocumentSummary & { created_at: string }> {
+  ): Promise<DocumentSummary & {
+    created_at: string;
+    abilities: Record<string, boolean>;
+  }> {
     const baseUrl = this.requireInstanceOrThrow();
-    const apiResponse = await fetch(
-      `${baseUrl}/api/v1.0/documents/${documentIdentifier}/`,
-    );
+    const url = `${baseUrl}/api/v1.0/documents/${documentIdentifier}/`;
+    const apiResponse = await this.requestPossiblyAuth(url);
 
     if (apiResponse.status === 404) {
       throw new DocsError(
         'DOC_NOT_FOUND',
         `Document ${documentIdentifier} not found on instance`,
+      );
+    }
+    if (apiResponse.status === 401 || apiResponse.status === 403) {
+      // 401/403 : doc non-public et soit on n'a pas de credentials, soit
+      // les credentials ne donnent pas accès au doc.
+      // / 401/403: non-public doc, no creds or creds don't grant access.
+      if (!this.credentialsStore.has()) {
+        throw new DocsError(
+          'DOC_NOT_PUBLIC',
+          `Document ${documentIdentifier} requires authentication (no credentials provided).`,
+        );
+      }
+      throw new DocsError(
+        'AUTH_REQUIRED',
+        this.buildAuthRequiredMessage('expired_or_invalid'),
       );
     }
     if (!apiResponse.ok) {
@@ -65,39 +88,43 @@ export class DocsRestClient {
       );
     }
 
-    const documentData = (await apiResponse.json()) as {
-      id: string;
-      title: string;
-      updated_at: string;
+    return (await apiResponse.json()) as DocumentSummary & {
       created_at: string;
-      link_reach: 'public' | 'authenticated' | 'restricted';
-      link_role: 'reader' | 'commenter' | 'editor';
+      abilities: Record<string, boolean>;
     };
-
-    if (documentData.link_reach !== 'public' && !this.credentialsStore.has()) {
-      throw new DocsError(
-        'DOC_NOT_PUBLIC',
-        `Document ${documentIdentifier} is not public (link_reach=${documentData.link_reach})`,
-      );
-    }
-
-    return documentData;
   }
 
-  async assertPublicEditor(documentIdentifier: DocumentId): Promise<void> {
+  /**
+   * Vérifie qu'on a accès en édition au doc.
+   * v0.3.1 : refactoré pour fonctionner avec docs privés authentifiés.
+   * On délègue à `abilities` retournées par l'API plutôt qu'à un check
+   * statique sur link_reach/link_role.
+   * / v0.3.1: refactored to work with authenticated private docs by
+   * / using the API's `abilities` field instead of static link_reach check.
+   *
+   * Anciennement nommée `assertPublicEditor` (v0.2). Le nouveau nom reflète
+   * mieux le scope : "j'ai le droit d'éditer le contenu de ce doc".
+   */
+  async assertEditAccess(documentIdentifier: DocumentId): Promise<void> {
     const documentMetadata = await this.fetchDocumentMetadata(documentIdentifier);
-    if (documentMetadata.link_reach !== 'public') {
-      throw new DocsError(
-        'DOC_NOT_PUBLIC',
-        `Document ${documentIdentifier} is not public (link_reach=${documentMetadata.link_reach})`,
-      );
-    }
-    if (documentMetadata.link_role !== 'editor') {
+    const abilities = documentMetadata.abilities ?? {};
+    // `partial_update` (PATCH) ou `update` (PUT) signifient qu'on peut
+    // modifier le doc. `can_edit` (alias plus récent) aussi.
+    // / partial_update / update / can_edit all imply edit access.
+    const canEdit = abilities.partial_update === true
+      || abilities.update === true
+      || abilities.can_edit === true;
+    if (!canEdit) {
       throw new DocsError(
         'DOC_READONLY',
-        `Document ${documentIdentifier} is public but read-only (link_role=${documentMetadata.link_role})`,
+        `Document ${documentIdentifier} is read-only for the current session (abilities.partial_update / update / can_edit all false).`,
       );
     }
+  }
+
+  /** @deprecated v0.2 alias — utiliser assertEditAccess */
+  async assertPublicEditor(documentIdentifier: DocumentId): Promise<void> {
+    return this.assertEditAccess(documentIdentifier);
   }
 
   async listPublicDocuments(): Promise<DocumentSummary[]> {

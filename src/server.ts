@@ -167,16 +167,123 @@ const toolDefinitionList = [
   { name: 'read_document', description: 'Lit la liste structurée des blocs d\'un document. Accepte doc_id ou doc_url.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string', format: 'uuid' }, doc_url: { type: 'string' } } } },
   { name: 'get_document_metadata', description: 'Métadonnées d\'un document.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, doc_url: { type: 'string' } } } },
   // v0.1 édition contenu
-  { name: 'insert_block', description: 'Insère un nouveau bloc dans le document.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, doc_url: { type: 'string' }, content: { type: 'object' }, after_block_id: { type: ['string', 'null'] } }, required: ['content'] } },
-  { name: 'update_block', description: 'Remplace le texte d\'un bloc.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, doc_url: { type: 'string' }, block_id: { type: 'string' }, text: { type: 'string' } }, required: ['block_id', 'text'] } },
-  { name: 'delete_block', description: 'Supprime un bloc.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, doc_url: { type: 'string' }, block_id: { type: 'string' } }, required: ['block_id'] } },
+  {
+    name: 'insert_block',
+    description: 'Insère un nouveau bloc (paragraph ou heading) dans un document. Le champ `content.text` accepte du **markdown inline** : **gras**, *italique*, `code inline`, ~~barré~~, [texte](url). Si `after_block_id` est fourni, insertion juste après ce bloc ; sinon, insertion en tête du document. Référence du document : doc_id (UUID nu) OU doc_url (URL complète comme https://notes.liiib.re/docs/<UUID>/).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        doc_id: { type: 'string', format: 'uuid', description: 'UUID du document. Alternative à doc_url.' },
+        doc_url: { type: 'string', description: 'URL complète du document (https://<instance>/docs/<UUID>/). Alternative à doc_id ; settle aussi l\'instance MCP si pas encore settled.' },
+        content: {
+          description: 'Contenu du nouveau bloc. Discriminé par `type` : "paragraph" ou "heading".',
+          oneOf: [
+            {
+              type: 'object',
+              properties: {
+                type: { const: 'paragraph', description: 'Bloc paragraphe.' },
+                text: { type: 'string', description: 'Texte du paragraphe. Markdown inline supporté (**gras**, *italique*, [lien](url), `code`, ~~barré~~).' },
+              },
+              required: ['type', 'text'],
+              additionalProperties: false,
+            },
+            {
+              type: 'object',
+              properties: {
+                type: { const: 'heading', description: 'Bloc titre (h1/h2/h3).' },
+                level: { type: 'integer', enum: [1, 2, 3], description: 'Niveau du heading. 1 = h1, 2 = h2, 3 = h3.' },
+                text: { type: 'string', description: 'Texte du titre. Markdown inline supporté.' },
+              },
+              required: ['type', 'level', 'text'],
+              additionalProperties: false,
+            },
+          ],
+        },
+        after_block_id: {
+          type: ['string', 'null'],
+          description: 'UUID d\'un bloc existant après lequel insérer le nouveau. Si null/absent, insertion en tête du document.',
+        },
+      },
+      required: ['content'],
+    },
+  },
+  {
+    name: 'update_block',
+    description: 'Remplace le contenu textuel d\'un bloc existant. Le texte est interprété comme du **markdown inline** (mêmes marqueurs que insert_block). Le type/niveau du bloc ne change pas — pour changer le type, fais delete_block puis insert_block.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        doc_id: { type: 'string', format: 'uuid' },
+        doc_url: { type: 'string' },
+        block_id: { type: 'string', description: 'UUID du bloc à modifier (récupéré via read_document ou retourné par insert_block).' },
+        text: { type: 'string', description: 'Nouveau texte du bloc. Markdown inline supporté (**gras**, *italique*, [lien](url), `code`, ~~barré~~).' },
+      },
+      required: ['block_id', 'text'],
+    },
+  },
+  {
+    name: 'delete_block',
+    description: 'Supprime un bloc d\'un document.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        doc_id: { type: 'string', format: 'uuid' },
+        doc_url: { type: 'string' },
+        block_id: { type: 'string', description: 'UUID du bloc à supprimer.' },
+      },
+      required: ['block_id'],
+    },
+  },
   // v0.2 auth
-  { name: 'set_session_credentials', description: 'Enregistre les cookies de session Docs en mémoire (docs_sessionid + csrftoken). Optionnel : instance_url pour settler l\'instance simultanément.', inputSchema: { type: 'object', properties: { docs_sessionid: { type: 'string' }, csrftoken: { type: 'string' }, instance_url: { type: 'string' } }, required: ['docs_sessionid', 'csrftoken'] } },
+  {
+    name: 'set_session_credentials',
+    description: 'Enregistre les cookies de session Docs en mémoire (docs_sessionid + csrftoken). Récupération : DevTools du navigateur connecté à l\'instance (F12 → Application/Stockage → Cookies → URL de l\'instance) → copier les valeurs des cookies `docs_sessionid` et `csrftoken`. Le couple expire ~12h après login. Optionnel : `instance_url` pour settle l\'instance MCP simultanément. Stockage en mémoire uniquement (jamais sur disque, jamais dans les outputs).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        docs_sessionid: { type: 'string', description: 'Valeur du cookie docs_sessionid (Django session).' },
+        csrftoken: { type: 'string', description: 'Valeur du cookie csrftoken (Django CSRF).' },
+        instance_url: { type: 'string', description: 'URL de l\'instance Docs (ex: https://notes.liiib.re). Optionnel.' },
+      },
+      required: ['docs_sessionid', 'csrftoken'],
+    },
+  },
   { name: 'clear_session_credentials', description: 'Vide les credentials. Conserve l\'instance settled.', inputSchema: { type: 'object', properties: {} } },
   // v0.2 écriture
-  { name: 'create_document', description: 'Crée un document. Si parent_id est fourni, c\'est un sous-doc ; sinon, top-level.', inputSchema: { type: 'object', properties: { title: { type: 'string' }, parent_id: { type: ['string', 'null'] } }, required: ['title'] } },
+  {
+    name: 'create_document',
+    description: 'Crée un nouveau document. Si `parent_id` est fourni, le doc est créé en tant que sous-document de ce parent (l\'utilisateur connecté doit avoir `can_update` sur le parent) ; sinon, doc top-level. Nécessite des credentials valides.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Titre du nouveau document.' },
+        parent_id: {
+          type: ['string', 'null'],
+          description: 'UUID du document parent. Si null/absent, doc top-level.',
+        },
+      },
+      required: ['title'],
+    },
+  },
   { name: 'delete_document', description: 'Supprime un document (cascade sur les sous-docs).', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, doc_url: { type: 'string' } } } },
-  { name: 'move_document', description: 'Déplace un document dans l\'arborescence.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, doc_url: { type: 'string' }, target_parent_id: { type: 'string' }, position: { type: 'string', enum: ['first-child', 'last-child', 'left', 'right'] } }, required: ['target_parent_id', 'position'] } },
+  {
+    name: 'move_document',
+    description: 'Déplace un document dans l\'arborescence. Position relative à `target_parent_id` : "first-child"/"last-child" pour devenir enfant, "left"/"right" pour devenir frère.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        doc_id: { type: 'string', format: 'uuid' },
+        doc_url: { type: 'string' },
+        target_parent_id: { type: 'string', format: 'uuid', description: 'UUID du document de référence pour la position.' },
+        position: {
+          type: 'string',
+          enum: ['first-child', 'last-child', 'left', 'right'],
+          description: 'first-child = premier enfant de target. last-child = dernier enfant. left = frère placé juste avant target. right = frère placé juste après target.',
+        },
+      },
+      required: ['target_parent_id', 'position'],
+    },
+  },
   { name: 'duplicate_document', description: 'Duplique un document.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, doc_url: { type: 'string' }, with_accesses: { type: 'boolean' } } } },
   { name: 'update_document_title', description: 'Renomme un document.', inputSchema: { type: 'object', properties: { doc_id: { type: 'string' }, doc_url: { type: 'string' }, title: { type: 'string' } }, required: ['title'] } },
   { name: 'list_my_documents', description: 'Liste les documents accessibles à l\'utilisateur connecté (incluant les privés).', inputSchema: { type: 'object', properties: { page: { type: 'integer' }, page_size: { type: 'integer' } } } },
@@ -187,7 +294,7 @@ const toolDefinitionList = [
 
 // -------- Création du serveur MCP
 const mcpServer = new Server(
-  { name: 'lasuite-docs-mcp', version: '0.2.0' },
+  { name: 'lasuite-docs-mcp', version: '0.3.0' },
   { capabilities: { tools: {} } },
 );
 
