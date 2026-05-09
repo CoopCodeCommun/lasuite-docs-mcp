@@ -147,17 +147,86 @@ function findBlockContentChild(
 }
 
 /**
- * Concatène le texte de tous les Y.XmlText enfants d'un élément.
- * / Concatenates text from all Y.XmlText children of an element.
+ * Sérialise le contenu inline d'un élément (paragraph, heading, ...) en
+ * markdown : les marks Yjs (bold/italic/code/strike/link) sont reconverties
+ * vers leurs marqueurs markdown (**bold**, *italic*, `code`, ~~strike~~,
+ * [text](url)).
+ * / Serializes inline content of an element back to markdown: Yjs marks
+ * / become markdown markers.
+ *
+ * C'est l'opération inverse de `appendInlineMarkdownToParent`. Permet à
+ * `read_document` de retourner du markdown propre que l'agent peut
+ * réutiliser tel quel dans un `update_block` ou un `insert_block`.
+ * / Inverse of appendInlineMarkdownToParent. Enables clean markdown
+ * / round-trips through read → update/insert.
  */
 function extractTextFromElement(parentElement: Y.XmlElement): string {
-  let concatenatedText = '';
+  let serializedMarkdown = '';
   for (const childNode of parentElement.toArray()) {
     if (childNode instanceof Y.XmlText) {
-      concatenatedText += childNode.toString();
+      serializedMarkdown += yjsTextToMarkdown(childNode);
     }
   }
-  return concatenatedText;
+  return serializedMarkdown;
+}
+
+/**
+ * Convertit un Y.XmlText en markdown en parcourant ses runs (delta).
+ * / Converts a Y.XmlText to markdown by walking its delta runs.
+ */
+function yjsTextToMarkdown(yjsText: Y.XmlText): string {
+  // toDelta() retourne [{insert: string, attributes?: {bold, italic, ...}}, ...]
+  // / toDelta() returns runs with insert + attributes.
+  type DeltaRun = { insert: string; attributes?: Record<string, unknown> };
+  const deltaRuns = yjsText.toDelta() as DeltaRun[];
+  let markdownOutput = '';
+  for (const run of deltaRuns) {
+    markdownOutput += runToMarkdown(run);
+  }
+  return markdownOutput;
+}
+
+/**
+ * Convertit un run (insert + attributes) en markdown. Wrappe le texte avec
+ * les marqueurs markdown selon les marks actives.
+ * / Wraps text with markdown markers per active marks.
+ *
+ * Ordre d'application des wrappers (de l'extérieur vers l'intérieur) :
+ *   link > strike > bold > italic > code
+ * Cet ordre n'a pas d'incidence fonctionnelle (markdown est associatif),
+ * mais on le fixe pour des sorties stables.
+ * / Wrapper order (outer → inner): link > strike > bold > italic > code.
+ * / Order is fixed for stable output (functionally associative).
+ */
+function runToMarkdown(deltaRun: { insert: string; attributes?: Record<string, unknown> }): string {
+  let wrappedText = deltaRun.insert;
+  const activeAttrs = deltaRun.attributes ?? {};
+
+  // Code en premier (le plus interne) : un caractère ` à chaque bout.
+  // / Code first (innermost): backticks.
+  if (activeAttrs.code === true) {
+    wrappedText = '`' + wrappedText + '`';
+  }
+  // Italic : *...*
+  if (activeAttrs.italic === true) {
+    wrappedText = '*' + wrappedText + '*';
+  }
+  // Bold : **...**
+  if (activeAttrs.bold === true) {
+    wrappedText = '**' + wrappedText + '**';
+  }
+  // Strike : ~~...~~
+  if (activeAttrs.strike === true) {
+    wrappedText = '~~' + wrappedText + '~~';
+  }
+  // Link : [text](href) — le plus externe pour englober tout le reste.
+  // / Link: outermost wrapper to enclose all other marks.
+  const linkAttribute = activeAttrs.link as { href?: string } | undefined;
+  if (linkAttribute && typeof linkAttribute.href === 'string') {
+    wrappedText = '[' + wrappedText + '](' + linkAttribute.href + ')';
+  }
+
+  return wrappedText;
 }
 
 /**

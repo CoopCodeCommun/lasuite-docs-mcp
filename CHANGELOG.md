@@ -1,5 +1,41 @@
 # Changelog
 
+## 3. Support du markdown inline et fix race condition / Inline markdown support and race condition fix
+
+**Date :** 2026-05-09
+**Version :** 0.3.0
+
+**Quoi / What :**
+- **Markdown inline** : `insert_block` et `update_block` interprètent désormais leur paramètre `text` comme du **markdown inline**. Les marqueurs `**gras**`, `*italique*`, `` `code inline` ``, `~~barré~~` deviennent des marks Yjs côté BlockNote ; les `[texte](url)` deviennent des liens cliquables (mark Yjs `link`).
+- **Round-trip markdown** : `read_document` retourne désormais le contenu en markdown (au lieu de pseudo-XML). Un agent peut lire un bloc, modifier le markdown, et le réinjecter via `update_block` sans perte.
+- **Fix race condition (v0.2.1 incluse)** : `insert_block`, `update_block`, `delete_block` attendent désormais que l'update Yjs soit propagé au serveur Hocuspocus avant de retourner. Avant ce fix, un process MCP éphémère (ex: appel JSON-RPC unique sur stdio) pouvait perdre l'update.
+- **Listage d'arborescence** (déjà ajouté en patch entre 0.2.0 et 0.3.0) : 2 nouveaux tools `list_document_children` et `list_document_descendants`. La surface MCP passe à **16 tools**.
+
+**Pourquoi / Why :** La v0.2 traitait le `text` comme du texte brut, ce qui produisait des sorties moches (`**gras**` apparaissait littéralement dans BlockNote). Un agent IA produit naturellement du markdown ; en supportant ce format en input et en output, on supprime la friction et on permet aux agents de générer de vrais documents structurés. La race condition était un bug latent qui se manifestait en usage script ou test d'intégration.
+
+### Fichiers ajoutés / Added files
+
+| Fichier / File | Rôle / Role |
+|---|---|
+| `src/docs/markdown.ts` | Parser markdown inline → marks Yjs (gras, italique, code, strike, link) |
+| `tests/markdown.test.ts` | Tests unitaires sur le parser (11 tests) |
+
+### Fichiers modifiés / Modified files
+
+| Fichier / File | Changement / Change |
+|---|---|
+| `src/docs/blocks.ts` | `buildContentElement` ne pose plus le contenu inline (refactor build → attach → populate). Nouvelle fonction `populateInlineContent`. `extractTextFromElement` reconverit les marks Yjs en markdown pour la sortie. |
+| `src/docs/session.ts` | `insertBlock` appelle `populateInlineContent` après attachement. `replaceTextInElement` reparse le markdown. Nouvelle méthode privée `awaitFlush` pour le fix race condition, appelée par `insertBlock`/`updateBlockText`/`deleteBlock`. |
+| `tests/blocks.test.ts` | Tests adaptés au nouveau pattern build → attach → populate. |
+| `package.json` | Dépendance `marked@^18` ajoutée. Version `0.3.0`. |
+
+### Migration
+
+- **Migration nécessaire / Migration required :** Non / No
+- L'API publique des tools n'a pas changé. Si un agent envoyait du texte brut sans aucun marqueur markdown, le comportement reste identique. Si un agent avait par accident `**` ou `_` dans son texte plain (cas rare), ces caractères seront maintenant interprétés.
+
+---
+
 ## 2. Authentification utilisateur et détection dynamique de l'instance / User authentication and dynamic instance detection
 
 **Date :** 2026-05-08

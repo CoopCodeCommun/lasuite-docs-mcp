@@ -4,7 +4,7 @@ Serveur **Model Context Protocol (MCP)** qui permet à un agent IA de lire et d'
 
 ## Statut
 
-v0.2.0 — authentification utilisateur (cookies de session Django + CSRF) et détection dynamique de l'instance à partir des liens. **16 tools** : lecture (incluant l'arborescence des descendants), édition de contenu, gestion de l'arborescence, authentification.
+v0.3.0 — support du **markdown inline** sur les opérations d'édition (`**gras**`, `*italique*`, `` `code` ``, `~~barré~~`, `[lien](url)`), avec round-trip markdown sur `read_document`. Hérite de la v0.2.0 : authentification utilisateur (cookies de session + CSRF) et détection dynamique de l'instance. **16 tools** : lecture (incluant l'arborescence des descendants), édition de contenu en markdown, gestion de l'arborescence, authentification.
 
 ## Tools MCP exposés
 
@@ -22,9 +22,22 @@ v0.2.0 — authentification utilisateur (cookies de session Django + CSRF) et d�
 
 | Tool | Usage |
 |---|---|
-| `insert_block` | Insère un paragraphe ou heading à un endroit précis |
-| `update_block` | Modifie le texte d'un bloc existant |
+| `insert_block` | Insère un paragraphe ou heading. Le `text` est interprété comme du **markdown inline** (gras, italique, code, strike, liens) |
+| `update_block` | Modifie le texte d'un bloc existant. Idem : markdown inline supporté |
 | `delete_block` | Supprime un bloc |
+
+**Format markdown supporté** sur les paramètres `text` de `insert_block` et `update_block` :
+
+| Markdown | Rendu BlockNote |
+|---|---|
+| `**gras**` | **gras** |
+| `*italique*` | *italique* |
+| `` `code` `` | `code` (police mono, fond gris) |
+| `~~barré~~` | ~~barré~~ |
+| `[texte](url)` | [texte](url) (lien cliquable) |
+| `\*` `\_` `\`` etc. | Caractères littéraux échappés |
+
+`read_document` retourne le contenu en markdown : un agent peut lire un bloc, modifier la chaîne markdown, et la réinjecter via `update_block` sans perte (round-trip propre).
 
 ### Authentification
 

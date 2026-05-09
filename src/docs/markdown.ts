@@ -222,20 +222,30 @@ function appendTokenToText(
  * n'est active, équivaut à un text.insert classique.
  * / Inserts text into a Y.XmlText with given marks. No-mark = plain insert.
  */
+/**
+ * Liste exhaustive des marks supportées. On passe toujours un objet
+ * attributes complet (avec null pour les marks inactives) pour empêcher
+ * Yjs d'hériter automatiquement des marks adjacentes.
+ * / Exhaustive marks list. Always pass complete attributes (null for
+ * / inactive) to prevent Yjs from auto-extending adjacent marks.
+ */
+const ALL_INLINE_MARK_KEYS = ['bold', 'italic', 'code', 'strike', 'link'] as const;
+
 function insertTextWithMarks(
   targetText: Y.XmlText,
   textToInsert: string,
   activeMarks: InlineMarks,
 ): void {
-  // Une mark "active" est soit un booléen true (bold/italic/code/strike),
-  // soit un objet non-null (link).
-  // / Active mark = true boolean (bold/italic/code/strike) or non-null object (link).
-  const hasAnyMark = Object.values(activeMarks).some(
-    (markValue) => markValue === true || (markValue !== undefined && markValue !== false),
-  );
-  if (hasAnyMark) {
-    targetText.insert(targetText.length, textToInsert, activeMarks as Record<string, unknown>);
-  } else {
-    targetText.insert(targetText.length, textToInsert);
+  // Construit un objet attributes complet : pour chaque mark possible,
+  // soit la valeur active, soit null pour la "reset".
+  // Sans cela, Yjs étend les marks du run précédent au nouveau texte
+  // (ex: après un insert italic, un insert sans marks hérite italic).
+  // / Build complete attributes: active value or null to reset. Without
+  // / this, Yjs auto-extends previous run's marks to the new text.
+  const fullAttributes: Record<string, unknown> = {};
+  for (const markKey of ALL_INLINE_MARK_KEYS) {
+    const markValue = activeMarks[markKey as keyof InlineMarks];
+    fullAttributes[markKey] = markValue === undefined || markValue === false ? null : markValue;
   }
+  targetText.insert(targetText.length, textToInsert, fullAttributes);
 }

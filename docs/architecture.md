@@ -286,7 +286,68 @@ Avant de construire les headers d'auth, `buildAuthHeaders()` vérifie que l'URL 
 
 ---
 
-## 7. Conventions de code
+## 7. Support du markdown inline (v0.3)
+
+### 7.1. Pattern build → attach → populate
+
+C'est la subtilité Yjs la plus profonde du projet, et elle découle directement du piège `_prelimAttrs` (§ 5) en l'aggravant : **les marks Yjs (`text.insert(pos, str, {bold: true})`) lèvent une `Invalid access` sur un `Y.XmlText` détaché**, contrairement à `setAttribute` qui lui peut être appelé sur un élément détaché et stocke dans `_prelimAttrs`.
+
+Conséquence : on ne peut pas construire un `blockContainer` complet en mémoire (avec son contenu inline) puis l'insérer dans le doc d'un coup. Il faut un pattern en trois temps :
+
+1. **Build** : créer le `blockContainer` et le content element (paragraph/heading) **vides**, sans contenu inline. À ce stade ils sont détachés mais on ne touche qu'aux `setAttribute` qui marche.
+2. **Attach** : insérer le `blockContainer` dans le `blockGroup` (qui est déjà dans le doc) → toute la chaîne devient attachée.
+3. **Populate** : appeler `populateInlineContent` qui parse le markdown et insère les `Y.XmlText` avec marks dans le content element. Comme la chaîne est attachée, les marks sont acceptées.
+
+```ts
+// Pattern dans session.ts::insertBlock (simplifié)
+ydoc.transact(() => {
+  const container = buildBlockContainer(content);            // 1. build (vide)
+  blockGroup.insert(insertionIndex, [container]);            // 2. attach
+  populateInlineContent(container, content.text);            // 3. populate (markdown)
+});
+```
+
+C'est le seul ordre qui marche. L'inverser (populate puis attach) jette `Invalid access`. Tester l'erreur en mémoire ne suffit pas : elle se manifeste à l'exécution, pas au typecheck.
+
+### 7.2. Marks Yjs et reset explicite des marks adjacentes
+
+Yjs a une caractéristique surprenante : **un texte inséré sans préciser de marks hérite des marks du run adjacent**. Si on insère `"plain "` (sans marks), puis `"fancy"` (italic), puis `" end"` (sans marks), Yjs étend l'italic au `" end"` en interne — sauf si on passe explicitement les marks à `null`.
+
+```ts
+// ❌ Faux — " end" hérite italic
+text.insert(pos, "plain ");
+text.insert(pos + 6, "fancy", { italic: true });
+text.insert(pos + 11, " end");
+
+// ✅ Correct — passer toutes les marks à null pour reset
+text.insert(pos, "plain ", { italic: null, bold: null, code: null, strike: null, link: null });
+```
+
+Le module `markdown.ts` utilise un objet attributes complet à chaque insert (avec les marks inactives à `null`), géré dans le helper `insertTextWithMarks`. Sans cette précaution, le rendu BlockNote final serait surprenant.
+
+### 7.3. Liens en mark, pas en élément XML
+
+Première intuition (et premier essai raté pendant l'implémentation) : représenter `[texte](url)` comme un `<link href="url">texte</link>` enfant du `Y.XmlElement`. **Faux** — BlockNote/ProseMirror utilise une mark `link: { href: "..." }` sur le `Y.XmlText`, exactement comme `bold` ou `italic`. Le résultat visible : avec un `<link>` enfant, le rendu n'affiche rien (pas même le texte) ; avec une mark `link`, le texte est rendu cliquable.
+
+C'est documenté dans le code source de `@blocknote/core` (schema ProseMirror), pas dans la doc utilisateur. Ce genre de détail est typiquement ce qui justifie un test live contre un vrai BlockNote, pas seulement contre le format Yjs côté serveur.
+
+### 7.4. Round-trip lecture/écriture
+
+`read_document` retourne maintenant le contenu en **markdown propre** (et non plus en pseudo-XML `<bold>...</bold>`). La fonction `yjsTextToMarkdown` parcourt le `delta` du `Y.XmlText` (qui retourne les runs avec leurs attributes) et reconstruit les marqueurs `**...**`, `*...*`, etc.
+
+Round-trip : un agent peut faire `read_document` → recevoir `"Markdown : **gras**, *italique*, [lien](url)."` → modifier la chaîne → la renvoyer via `update_block` → le rendu reste cohérent. Pas de perte d'information.
+
+### 7.5. Race condition sur les ops d'écriture (corrigée en v0.2.1)
+
+Les tools `insert_block` / `update_block` / `delete_block` retournent maintenant **après** que l'update Yjs ait été propagé au serveur Hocuspocus. Implémentation : `awaitFlush(provider)` qui observe `provider.unsyncedChanges` et resolve quand le compteur revient à `0`.
+
+Sans cette attente, un process MCP éphémère (par exemple un `echo ... | node dist/server.js` unique) pouvait perdre l'update : la transaction Yjs locale réussissait, le `block_id` était retourné, mais la WebSocket se fermait avant l'envoi vers le serveur. Le bloc disparaissait silencieusement. Symptôme observé pendant le développement : un `delete_block` sur l'id reçu retournait `BLOCK_NOT_FOUND`, alors qu'on venait juste de le créer.
+
+Pour les usages "longs" (Claude Desktop, Claude Code), la race était invisible parce que le process restait vivant entre les tool calls. Le fix s'aligne sur le comportement attendu pour tous les modes d'usage.
+
+---
+
+## 8. Conventions de code
 
 Le projet suit le style **FALC** (Facile A Lire et Comprendre), inspiré du skill `djc` adapté au contexte Node/TypeScript :
 
@@ -302,7 +363,7 @@ Pourquoi ces règles ? Pour que le code reste lisible par un développeur qui n'
 
 ---
 
-## 8. Comment ce projet a été construit
+## 9. Comment ce projet a été construit
 
 Ce projet a été construit en une session avec [Claude Code](https://docs.claude.com/en/docs/claude-code) en suivant le framework [Superpowers](https://github.com/anthropics/skills) :
 
@@ -321,7 +382,7 @@ Elle a aussi mis en évidence des limites à connaître : un piège technique r�
 
 ---
 
-## 9. Pour aller plus loin
+## 10. Pour aller plus loin
 
 **Ressources internes :**
 - [`README.md`](../README.md) — install, configuration, usage avec Claude Desktop
