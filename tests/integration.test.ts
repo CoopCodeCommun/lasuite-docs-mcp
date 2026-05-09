@@ -22,6 +22,8 @@
 
 import { SessionManager } from '../src/docs/session.js';
 import { DocsRestClient } from '../src/docs/client.js';
+import { CredentialsStore } from '../src/auth/credentials.js';
+import { InstanceStore } from '../src/auth/instance.js';
 
 async function main(): Promise<void> {
   const docsInstanceUrl = process.env.DOCS_INSTANCE_URL;
@@ -34,7 +36,14 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const docsRestClient = new DocsRestClient(docsInstanceUrl);
+  // v0.2 : DocsRestClient prend désormais (InstanceStore, CredentialsStore).
+  // Pour ce test de lecture publique, on settle l'instance depuis l'env mais
+  // on laisse le credentials store vide (lecture anonyme).
+  // / v0.2: DocsRestClient now takes (InstanceStore, CredentialsStore).
+  // / Public read test: settle instance from env, leave credentials empty.
+  const instanceStore = InstanceStore.fromEnv({ DOCS_INSTANCE_URL: docsInstanceUrl });
+  const credentialsStore = new CredentialsStore();
+  const docsRestClient = new DocsRestClient(instanceStore, credentialsStore);
   const sessionManager = new SessionManager(docsInstanceUrl, 300_000, 10_000);
 
   let createdBlockId: string | null = null;
