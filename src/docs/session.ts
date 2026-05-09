@@ -25,6 +25,7 @@ import {
 } from '@hocuspocus/provider';
 import * as Y from 'yjs';
 import { createDocsWebSocketClass } from './connection.js';
+import { appendInlineMarkdownToParent } from './markdown.js';
 import { DocsError } from '../types.js';
 import type { DocumentId } from '../types.js';
 import type { CredentialsStore } from '../auth/credentials.js';
@@ -249,12 +250,16 @@ export class SessionManager {
       buildBlockContainer,
       findOrCreateTopLevelBlockGroup,
       findBlockContainerIndex,
+      populateInlineContent,
     } = await import('./blocks.js');
 
     let newBlockIdentifier = '';
 
     openSession.yjsDocument.transact(() => {
       const topLevelBlockGroup = findOrCreateTopLevelBlockGroup(documentFragment);
+      // 1. Construit le blockContainer + son content element vide
+      //    (paragraph/heading sans contenu inline).
+      // / Build empty blockContainer + content element (no inline yet).
       const builtBlockContainer = buildBlockContainer(blockContent);
 
       const insertionIndex = computeInsertionIndex(
@@ -262,16 +267,32 @@ export class SessionManager {
         afterBlockIdentifier,
         findBlockContainerIndex,
       );
+      // 2. Attache le blockContainer au blockGroup (qui est déjà dans le doc).
+      // / Attach blockContainer to blockGroup (already in doc).
       topLevelBlockGroup.insert(insertionIndex, [builtBlockContainer]);
 
-      // Lit l'attribut id APRÈS l'intégration. Avant l'insert dans le
-      // blockGroup, les attributs vivent dans _prelimAttrs et getAttribute
-      // retourne undefined (limitation Yjs 13.6.x).
-      // / Read the id attribute AFTER integration. Before the blockGroup
-      // / insert, attributes live in _prelimAttrs and getAttribute returns
-      // / undefined (Yjs 13.6.x constraint).
+      // 3. MAINTENANT que tout est attaché au doc, on peut appliquer les
+      //    marks Yjs (gras, italique, code, strike) sur les Y.XmlText et
+      //    insérer des <link> enfants. Sur un élément détaché, ça lèverait
+      //    "Invalid access: Add Yjs type to a document before reading data".
+      // / NOW that everything is attached, apply Yjs marks and insert <link>.
+      populateInlineContent(builtBlockContainer, blockContent.text);
+
+      // 4. Lit l'attribut id APRÈS l'intégration. Avant l'insert dans le
+      //    blockGroup, les attributs vivent dans _prelimAttrs et getAttribute
+      //    retourne undefined (limitation Yjs 13.6.x).
+      // / Read id AFTER integration (Yjs _prelimAttrs constraint).
       newBlockIdentifier = builtBlockContainer.getAttribute('id') ?? '';
     });
+
+    // Attend que l'update soit propagé au serveur Hocuspocus avant de
+    // retourner. Sans ce flush, un process MCP qui termine vite (ex: un
+    // appel JSON-RPC unique sur stdio) peut perdre l'update : la
+    // transaction Yjs locale réussit, on retourne le block_id, mais le
+    // socket WebSocket se ferme avant l'envoi.
+    // / Wait for update to propagate to Hocuspocus before returning.
+    // / Without this, a short-lived MCP process can drop the update.
+    await this.awaitFlush(openSession.hocuspocusProvider);
 
     return newBlockIdentifier;
   }
@@ -319,6 +340,10 @@ export class SessionManager {
     openSession.yjsDocument.transact(() => {
       replaceTextInElement(contentElement, newText);
     });
+
+    // Flush pour garantir la propagation au serveur (cf. insertBlock).
+    // / Flush to guarantee server propagation (see insertBlock).
+    await this.awaitFlush(openSession.hocuspocusProvider);
   }
 
   /**
@@ -356,6 +381,50 @@ export class SessionManager {
       if (topLevelBlockGroup) {
         topLevelBlockGroup.delete(blockIndex, 1);
       }
+    });
+
+    // Flush pour garantir la propagation au serveur (cf. insertBlock).
+    // / Flush to guarantee server propagation (see insertBlock).
+    await this.awaitFlush(openSession.hocuspocusProvider);
+  }
+
+  /**
+   * Attend que tous les updates locaux aient été propagés au serveur
+   * Hocuspocus avant de retourner. Évite la race condition où un process
+   * MCP éphémère termine sur EOF stdin avant que la WebSocket ait flushé.
+   * / Waits for all local updates to propagate to the Hocuspocus server.
+   * / Avoids race condition on short-lived MCP processes.
+   *
+   * Mécanisme : le HocuspocusProvider expose `hasUnsyncedChanges` (booléen)
+   * et émet l'event `unsyncedChanges` à chaque incrément/décrément du
+   * compteur interne. Le compteur revient à 0 quand le serveur a ack tous
+   * les updates en cours.
+   */
+  private async awaitFlush(
+    hocuspocusProvider: HocuspocusProvider,
+    timeoutMs: number = 5_000,
+  ): Promise<void> {
+    if (!hocuspocusProvider.hasUnsyncedChanges) {
+      return;
+    }
+    return new Promise<void>((resolve, reject) => {
+      const onUnsyncedChange = (count: number) => {
+        if (count === 0) {
+          hocuspocusProvider.off('unsyncedChanges', onUnsyncedChange);
+          clearTimeout(timeoutHandle);
+          resolve();
+        }
+      };
+      const timeoutHandle = setTimeout(() => {
+        hocuspocusProvider.off('unsyncedChanges', onUnsyncedChange);
+        reject(
+          new DocsError(
+            'SYNC_TIMEOUT',
+            `Hocuspocus flush timeout after ${timeoutMs}ms — l'update local n'a pas été propagé au serveur dans les temps.`,
+          ),
+        );
+      }, timeoutMs);
+      hocuspocusProvider.on('unsyncedChanges', onUnsyncedChange);
     });
   }
 
@@ -441,27 +510,22 @@ function findFirstNonBlockGroupChild(
  */
 function replaceTextInElement(
   parentElement: Y.XmlElement,
-  newText: string,
+  newMarkdownInline: string,
 ): void {
-  // 1. Identifie tous les Y.XmlText enfants à supprimer.
-  // / Identify all Y.XmlText children to delete.
-  const childArray = parentElement.toArray();
-  const textNodeIndices: number[] = [];
-  for (let nodeIndex = 0; nodeIndex < childArray.length; nodeIndex++) {
-    if (childArray[nodeIndex] instanceof Y.XmlText) {
-      textNodeIndices.push(nodeIndex);
-    }
+  // v0.3 : on supprime TOUS les enfants existants (Y.XmlText et autres,
+  // notamment les <link> qu'on a pu insérer auparavant), puis on
+  // ré-insère le contenu inline parsé en markdown.
+  // / v0.3: delete ALL existing children (Y.XmlText and <link> elements),
+  // / then re-insert the markdown-parsed inline content.
+
+  // 1. Supprime tous les enfants existants (du dernier au premier).
+  // / Delete all existing children (last to first).
+  const childCount = parentElement.length;
+  for (let reverseIndex = childCount - 1; reverseIndex >= 0; reverseIndex--) {
+    parentElement.delete(reverseIndex, 1);
   }
 
-  // 2. Supprime les Y.XmlText du dernier au premier (pour ne pas décaler).
-  // / Delete Y.XmlText from last to first (so indices don't shift).
-  for (let reverseIndex = textNodeIndices.length - 1; reverseIndex >= 0; reverseIndex--) {
-    parentElement.delete(textNodeIndices[reverseIndex], 1);
-  }
-
-  // 3. Insère un nouveau Y.XmlText avec le texte de remplacement.
-  // / Insert a new Y.XmlText with the replacement text.
-  const newTextNode = new Y.XmlText();
-  newTextNode.insert(0, newText);
-  parentElement.insert(0, [newTextNode]);
+  // 2. Insère le nouveau contenu via le parser markdown inline.
+  // / Insert the new content via inline markdown parser.
+  appendInlineMarkdownToParent(parentElement, newMarkdownInline);
 }

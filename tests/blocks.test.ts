@@ -6,7 +6,7 @@
  */
 import { describe, it, expect } from 'vitest';
 import * as Y from 'yjs';
-import { xmlFragmentToBlocks, buildBlockContainer } from '../src/docs/blocks.js';
+import { xmlFragmentToBlocks, buildBlockContainer, populateInlineContent } from '../src/docs/blocks.js';
 import { findBlockContainerById } from '../src/docs/blocks.js';
 
 describe('xmlFragmentToBlocks', () => {
@@ -103,13 +103,15 @@ describe('buildBlockContainer', () => {
 
     let builtBlockContainer!: Y.XmlElement;
     testDoc.transact(() => {
-      // Act
+      // Act : v0.3 — pattern complet build → attach → populate.
+      // / v0.3: full pattern build → attach → populate.
       builtBlockContainer = buildBlockContainer({
         type: 'paragraph',
         text: 'Hello world',
       });
       testBlockGroup.insert(0, [builtBlockContainer]);
       testFragment.insert(0, [testBlockGroup]);
+      populateInlineContent(builtBlockContainer, 'Hello world');
     });
 
     // Assert : c'est bien un blockContainer avec id, attrs et un paragraph dedans
@@ -142,7 +144,8 @@ describe('buildBlockContainer', () => {
 
     let builtBlockContainer!: Y.XmlElement;
     testDoc.transact(() => {
-      // Act
+      // Act : v0.3 — pattern complet build → attach → populate.
+      // / v0.3: full pattern build → attach → populate.
       builtBlockContainer = buildBlockContainer({
         type: 'heading',
         level: 2,
@@ -150,6 +153,7 @@ describe('buildBlockContainer', () => {
       });
       testBlockGroup.insert(0, [builtBlockContainer]);
       testFragment.insert(0, [testBlockGroup]);
+      populateInlineContent(builtBlockContainer, 'Titre');
     });
 
     // Assert
@@ -171,12 +175,18 @@ describe('round-trip', () => {
 
     yjsDocument.transact(() => {
       const blockGroup = new Y.XmlElement('blockGroup');
-      blockGroup.insert(0, [
-        buildBlockContainer({ type: 'paragraph', text: 'Premier' }),
-        buildBlockContainer({ type: 'heading', level: 1, text: 'Titre' }),
-        buildBlockContainer({ type: 'paragraph', text: 'Dernier' }),
-      ]);
+      // v0.3 : on attache d'abord chaque blockContainer puis on populate
+      // son contenu. populateInlineContent doit s'exécuter sur des éléments
+      // attachés au doc (sinon les marks Yjs lèvent une erreur).
+      // / v0.3: attach first, then populate (marks need attachment).
+      const c1 = buildBlockContainer({ type: 'paragraph', text: 'Premier' });
+      const c2 = buildBlockContainer({ type: 'heading', level: 1, text: 'Titre' });
+      const c3 = buildBlockContainer({ type: 'paragraph', text: 'Dernier' });
+      blockGroup.insert(0, [c1, c2, c3]);
       documentFragment.insert(0, [blockGroup]);
+      populateInlineContent(c1, 'Premier');
+      populateInlineContent(c2, 'Titre');
+      populateInlineContent(c3, 'Dernier');
     });
 
     // Act

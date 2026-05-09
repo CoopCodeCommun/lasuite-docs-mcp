@@ -24,6 +24,7 @@
 
 import * as Y from 'yjs';
 import { randomUUID } from 'node:crypto';
+import { appendInlineMarkdownToParent } from './markdown.js';
 import type { Block, BlockContent, BlockId } from '../types.js';
 
 /**
@@ -296,14 +297,18 @@ export function findOrCreateTopLevelBlockGroup(
  * / Builds the content element of a block (paragraph or heading).
  */
 function buildContentElement(blockContent: BlockContent): Y.XmlElement {
+  // ATTENTION (Yjs _prelimAttrs trap) : on ne touche PAS au contenu inline
+  // ici, parce que cet élément n'est pas encore attaché à un Y.Doc. Les
+  // marks Yjs (`text.insert(pos, str, {bold:true})`) lèvent une erreur sur
+  // un Y.XmlText détaché. C'est `populateInlineContent` qui finalise le
+  // contenu APRÈS attachement (cf. session.ts::insertBlock).
+  // / Yjs gotcha: marks fail on detached elements. populateInlineContent
+  // / fills the content AFTER the chain is attached to the doc.
   if (blockContent.type === 'paragraph') {
     const paragraphElement = new Y.XmlElement('paragraph');
     paragraphElement.setAttribute('backgroundColor', 'default');
     paragraphElement.setAttribute('textColor', 'default');
     paragraphElement.setAttribute('textAlignment', 'left');
-    const paragraphText = new Y.XmlText();
-    paragraphText.insert(0, blockContent.text);
-    paragraphElement.insert(0, [paragraphText]);
     return paragraphElement;
   }
 
@@ -313,8 +318,45 @@ function buildContentElement(blockContent: BlockContent): Y.XmlElement {
   headingElement.setAttribute('textColor', 'default');
   headingElement.setAttribute('textAlignment', 'left');
   headingElement.setAttribute('level', String(blockContent.level));
-  const headingText = new Y.XmlText();
-  headingText.insert(0, blockContent.text);
-  headingElement.insert(0, [headingText]);
   return headingElement;
+}
+
+/**
+ * Finalise le contenu inline d'un blockContainer DÉJÀ ATTACHÉ au doc.
+ * Trouve le paragraph/heading enfant et y insère le markdown parsé.
+ * / Finalizes inline content of a blockContainer ALREADY ATTACHED to doc.
+ *
+ * Doit être appelé après que le blockContainer ait été inséré dans son
+ * parent (blockGroup), pour que les marks Yjs et les <link> children
+ * puissent être créés sans déclencher l'erreur "Invalid access: Add Yjs
+ * type to a document before reading data".
+ */
+export function populateInlineContent(
+  attachedBlockContainer: Y.XmlElement,
+  inlineMarkdown: string,
+): void {
+  const contentElement = findFirstNonBlockGroupChildExt(attachedBlockContainer);
+  if (contentElement === null) {
+    return;
+  }
+  appendInlineMarkdownToParent(contentElement, inlineMarkdown);
+}
+
+/**
+ * Helper local (non exporté à part) : trouve le premier enfant non-blockGroup
+ * d'un blockContainer. Dupliqué de session.ts pour éviter import circulaire.
+ * / Local helper: first non-blockGroup child. Duplicated to avoid cycle.
+ */
+function findFirstNonBlockGroupChildExt(
+  blockContainerElement: Y.XmlElement,
+): Y.XmlElement | null {
+  for (const childElement of blockContainerElement.toArray()) {
+    if (
+      childElement instanceof Y.XmlElement &&
+      childElement.nodeName !== 'blockGroup'
+    ) {
+      return childElement;
+    }
+  }
+  return null;
 }
