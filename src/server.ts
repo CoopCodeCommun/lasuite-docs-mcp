@@ -146,10 +146,24 @@ const deleteBlockInputSchema = z.intersection(
   z.object({ block_id: z.string() }),
 );
 
+// Borne haute pour image_data_base64. base64 multiplie la taille par ~1.33,
+// donc 10 Mo de base64 ≈ 7.5 Mo binaire — confortable pour un schéma ou
+// une capture, et raisonnable pour passer dans un message MCP. Au-delà,
+// l'agent doit redimensionner ou demander à l'utilisateur d'uploader
+// directement via le navigateur.
+// / Cap on image_data_base64 size. 10 MB base64 ≈ 7.5 MB binary.
+const MAX_IMAGE_BASE64_BYTES = 10 * 1024 * 1024;
+
 const insertImageInputSchema = z.intersection(
   documentReferenceSchema,
   z.object({
-    image_data_base64: z.string().min(1),
+    image_data_base64: z
+      .string()
+      .min(1, 'image_data_base64 ne peut pas être vide')
+      .max(
+        MAX_IMAGE_BASE64_BYTES,
+        `image_data_base64 dépasse la limite de ${MAX_IMAGE_BASE64_BYTES} caractères (~7.5 Mo binaire). Redimensionne l'image avant upload.`,
+      ),
     file_name: z.string().min(1),
     mime_type: z.string().optional(),
     caption: z.string().optional(),
@@ -466,24 +480,52 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         return formatToolSuccess(withAnonymousPersistenceWarning({ ok: true }));
       }
       case 'insert_image': {
+        // Tool insert_image — upload + insertion d'un bloc image.
+        // / Tool insert_image — upload + image block insertion.
+        //
+        // LOCALISATION : src/server.ts (case 'insert_image')
+        //
+        // FLUX :
+        // 1. Valide l'input (zod). Borne haute MAX_IMAGE_BASE64_BYTES.
+        // 2. Résout doc_id ou doc_url (settle l'instance si besoin).
+        // 3. Vérifie l'accès en édition via assertEditAccess (REST).
+        // 4. Décode le base64 en buffer binaire.
+        // 5. Devine le MIME type si non fourni (extension du file_name).
+        // 6. Upload via DocsRestClient.uploadAttachment (POST multipart) →
+        //    URL absolue media-check (polling antivirus).
+        // 7. Insert le bloc image dans le Y.Doc via SessionManager.
+        //    insertImageBlock — qui fait awaitFlush + PATCH /content/.
+        // 8. Retourne {block_id, image_url}, plus warning si anonyme.
+        //
+        // COMMUNICATION :
+        // Reçoit : appel MCP de l'agent avec image en base64.
+        // Émet :
+        //   - REST : POST /api/v1.0/documents/{id}/attachment-upload/
+        //   - REST : PATCH /api/v1.0/documents/{id}/ (persistance content)
+        //   - WS Yjs : update du Y.Doc collaboratif (visible chez les
+        //     éditeurs humains connectés en temps réel).
         const input = insertImageInputSchema.parse(rawArgs);
         const docId = resolveDocumentReference(input);
         await docsRestClient.assertEditAccess(docId);
+
         // Décode le base64 reçu de l'agent en buffer binaire avant
         // l'upload multipart. Si le base64 est invalide, Buffer.from
         // produit un buffer tronqué silencieusement — on accepte ce
-        // comportement (le serveur Docs validera côté antivirus/format).
-        // / Decode base64 from agent input. Invalid base64 produces a
-        // / truncated buffer silently — Docs server validates server-side.
+        // comportement (le serveur Docs validera côté antivirus/format
+        // et renverra une erreur HTTP qu'on remontera à l'agent).
+        // / Decode base64 from agent input. Invalid base64 → truncated
+        // / buffer silently — Docs server validates and returns an error.
         const fileBuffer = Buffer.from(input.image_data_base64, 'base64');
         const inferredMimeType =
           input.mime_type ?? guessMimeTypeFromFileName(input.file_name);
+
         const imageUrl = await docsRestClient.uploadAttachment(
           docId,
           fileBuffer,
           input.file_name,
           inferredMimeType,
         );
+
         const blockId = await getSessionManager().insertImageBlock(
           docId,
           {
@@ -493,6 +535,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
           },
           input.after_block_id ?? null,
         );
+
         return formatToolSuccess(
           withAnonymousPersistenceWarning({
             block_id: blockId,
