@@ -48,6 +48,7 @@ export type DocsErrorCode =
   | 'DOC_NOT_FOUND'
   | 'DOC_NOT_PUBLIC'
   | 'AUTH_REQUIRED'
+  | 'PERMISSION_DENIED'
   | 'INSTANCE_NOT_SET'
   | 'INSTANCE_MISMATCH'
   | 'DOC_READONLY'

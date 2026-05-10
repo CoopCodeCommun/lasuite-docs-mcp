@@ -2,6 +2,20 @@
 
 Serveur **Model Context Protocol (MCP)** qui permet à un agent IA de lire et d'éditer des documents sur une instance [la-suite Docs](https://github.com/suitenumerique/docs), avec édition fine au niveau du paragraphe et compatibilité temps réel avec les éditeurs humains connectés.
 
+## Co-édition live agent ↔ humain
+
+Le truc qui rend ce MCP particulier : **l'agent et toi partagez le même état Yjs (CRDT) en temps réel**, comme deux humains qui éditeraient le même Google Doc. Concrètement :
+
+- Tu tapes dans BlockNote (le navigateur), **l'agent voit ta modif** au prochain `read_document`. Pas de cache à invalider, pas de "synchroniser maintenant" à cliquer.
+- L'agent insère un paragraphe, il **apparaît instantanément dans ton navigateur**, sans recharger la page.
+- Vous pouvez taper en même temps dans le même paragraphe : Yjs résout les conflits par construction (CRDT). Personne n'écrase personne.
+
+Pas de polling à coder côté agent, pas de mécanisme custom : c'est la nature même du protocole Yjs/Hocuspocus que Docs utilise. Le serveur MCP est juste un client Yjs comme ton navigateur — tous les clients connectés au même doc reçoivent les updates des autres en background.
+
+**Cas d'usage typique :** « Claude, rédige la section 2 pendant que j'écris l'intro » — chacun travaille dans son coin de la même page, l'agent suit ce que tu fais, tu vois ce qu'il pose, et au final c'est cohérent. Sans aucun copier-coller, sans `git pull`, sans rafraîchissement.
+
+> Note technique : le serveur MCP doit rester long-lived pour que la WebSocket reste chaude (donc Claude Desktop / Claude Code OK ; pas un script qui spawn `node` à chaque appel). Le SessionManager garde la connexion ouverte 5 min après le dernier appel, puis la ferme par GC. Tout ça est transparent pour l'agent.
+
 ## Statut
 
 v0.3.0 — support du **markdown inline** sur les opérations d'édition (`**gras**`, `*italique*`, `` `code` ``, `~~barré~~`, `[lien](url)`), avec round-trip markdown sur `read_document`. Hérite de la v0.2.0 : authentification utilisateur (cookies de session + CSRF) et détection dynamique de l'instance. **16 tools** : lecture (incluant l'arborescence des descendants), édition de contenu en markdown, gestion de l'arborescence, authentification.

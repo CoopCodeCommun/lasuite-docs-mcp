@@ -355,9 +355,13 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         if (input.instance_url) {
           const incomingOrigin = new URL(input.instance_url).origin;
           if (instanceStore.has() && instanceStore.get() !== incomingOrigin) {
-            // Switch volontaire d'instance : on clear le SessionManager pour
-            // qu'il soit re-créé avec la nouvelle URL au prochain accès.
-            // / Voluntary instance switch: clear SessionManager too.
+            // Switch volontaire d'instance : on ferme proprement le
+            // SessionManager existant (pour ne pas laisser de WebSocket
+            // ouverte sur l'ancienne instance) puis on le remet à null.
+            // Il sera re-créé avec la nouvelle URL au prochain accès.
+            // / Voluntary instance switch: shutdown old SessionManager
+            // / before clearing, so its WebSockets don't leak.
+            sessionManager?.shutdown();
             sessionManager = null;
           }
           instanceStore.set(input.instance_url);
@@ -366,10 +370,48 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
           docs_sessionid: input.docs_sessionid,
           csrftoken: input.csrftoken,
         });
-        return formatToolSuccess({ ok: true });
+        // Vérifie immédiatement que ces cookies ouvrent bien une session
+        // côté serveur Django via GET /users/me/. Sans ce check, des
+        // cookies morts passent inaperçus tant que l'agent ne tente pas
+        // une op REST authentifiée — parce que la lecture/écriture sur
+        // les docs en lien public marche en anonyme. Ce check transforme
+        // un fail-silencieux différé en feedback immédiat.
+        // / Verify cookies open a real Django session right now via
+        // / /users/me/. Otherwise dead cookies pass undetected because
+        // / public-link docs accept anonymous reads/writes.
+        let authenticatedUser: Record<string, unknown>;
+        try {
+          authenticatedUser = await docsRestClient.verifyAuthenticatedUser();
+        } catch (verifyError) {
+          // Vérification échouée : on remet l'état à zéro pour que l'agent
+          // sache qu'il n'est pas authentifié. On ne touche PAS à
+          // instanceStore (l'agent peut vouloir retenter avec d'autres
+          // cookies sur la même instance).
+          // / Verification failed: clear creds so the agent's view of state
+          // / matches reality. Keep instanceStore (agent may retry).
+          credentialsStore.clear();
+          throw verifyError;
+        }
+        // Vérification OK. On purge maintenant les WebSocket ouvertes :
+        // le cookie de session est calculé UNIQUEMENT au handshake WS,
+        // donc une WS déjà ouverte (potentiellement anonyme) continuerait
+        // à utiliser l'ancien cookie. Le prochain appel re-créera la WS
+        // avec les nouveaux cookies validés.
+        // / Cookie is only sent on WS handshake. Reset cache so the next
+        // / call rebuilds the WS with the validated cookie.
+        sessionManager?.shutdown();
+        sessionManager = null;
+        return formatToolSuccess({ ok: true, user: authenticatedUser });
       }
       case 'clear_session_credentials': {
         credentialsStore.clear();
+        // Mêmes raisons que set_session_credentials : on ne veut pas
+        // qu'une WS authentifiée reste cachée alors que le user a
+        // explicitement demandé de revenir en mode anonyme.
+        // / Same reasoning as set_session_credentials: don't keep
+        // / authenticated WS cached after user requested anonymous.
+        sessionManager?.shutdown();
+        sessionManager = null;
         return formatToolSuccess({ ok: true });
       }
       case 'create_document': {

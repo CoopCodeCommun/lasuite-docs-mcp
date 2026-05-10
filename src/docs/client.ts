@@ -67,10 +67,11 @@ export class DocsRestClient {
         `Document ${documentIdentifier} not found on instance`,
       );
     }
-    if (apiResponse.status === 401 || apiResponse.status === 403) {
-      // 401/403 : doc non-public et soit on n'a pas de credentials, soit
-      // les credentials ne donnent pas accès au doc.
-      // / 401/403: non-public doc, no creds or creds don't grant access.
+    if (apiResponse.status === 401) {
+      // 401 : pas authentifié (ou session expirée). Si on n'a pas de creds,
+      // on traite comme un doc privé. Si on a des creds, c'est qu'elles
+      // sont mortes côté serveur (expirées, supprimées, mauvais cookie).
+      // / 401: not authenticated. No creds → private doc; with creds → expired.
       if (!this.credentialsStore.has()) {
         throw new DocsError(
           'DOC_NOT_PUBLIC',
@@ -80,6 +81,24 @@ export class DocsRestClient {
       throw new DocsError(
         'AUTH_REQUIRED',
         this.buildAuthRequiredMessage('expired_or_invalid'),
+      );
+    }
+    if (apiResponse.status === 403) {
+      // 403 : authentifié mais pas autorisé (ou doc privé pour anonyme).
+      // Sans creds, on traite comme privé (équivalent 401 fonctionnellement).
+      // Avec creds, c'est une vraie permission refusée — pas une session morte.
+      // Lever AUTH_REQUIRED ici trompe l'agent qui repose des cookies inutilement.
+      // / 403: authenticated but forbidden (or private doc for anonymous).
+      // / Avoid AUTH_REQUIRED with creds — it misleads the agent.
+      if (!this.credentialsStore.has()) {
+        throw new DocsError(
+          'DOC_NOT_PUBLIC',
+          `Document ${documentIdentifier} requires authentication (no credentials provided).`,
+        );
+      }
+      throw new DocsError(
+        'PERMISSION_DENIED',
+        await this.buildPermissionDeniedMessage(apiResponse, `GET ${url}`),
       );
     }
     if (!apiResponse.ok) {
@@ -151,6 +170,57 @@ export class DocsRestClient {
       }
     }
     return publicDocumentList;
+  }
+
+  /**
+   * Vérifie que les credentials actuellement stockés ouvrent bien une
+   * session côté serveur Django, en pingant /api/v1.0/users/me/.
+   * / Confirms the current credentials open a real Django session by
+   * / pinging /api/v1.0/users/me/.
+   *
+   * À appeler juste après set_session_credentials. Sans cette vérif, un
+   * agent qui pose des cookies morts peut être trompé par le fait que
+   * read_document, insert_block, etc. continuent de fonctionner — non pas
+   * grâce aux cookies, mais parce que beaucoup de docs Docs sont en
+   * computed_link_reach=public/editor, ce qui permet à TOUT LE MONDE
+   * (même non authentifié) de lire et d'éditer leur contenu via Yjs.
+   * Seules les opérations REST exigeant une vraie identité Django
+   * (comme create_document) échouent — ce qui crée l'illusion "4 ops sur
+   * 5 marchent avec mes creds, donc mes creds sont valides", alors que
+   * toutes ces 4 ops marchaient en réalité sans aucun cookie.
+   * / Without this, dead cookies pass undetected because most public docs
+   * / accept anonymous reads/writes via the public link, masking the auth.
+   *
+   * Lève DocsError('AUTH_REQUIRED', variant 'invalid_at_set') si le
+   * serveur retourne 401/403. Retourne le body de /users/me/ en cas de
+   * succès (l'appelant peut y trouver email, full_name, etc. pour les
+   * exposer à l'agent).
+   */
+  async verifyAuthenticatedUser(): Promise<Record<string, unknown>> {
+    const baseUrl = this.requireInstanceOrThrow();
+    if (!this.credentialsStore.has()) {
+      throw new DocsError(
+        'AUTH_REQUIRED',
+        this.buildAuthRequiredMessage('missing'),
+      );
+    }
+    const url = `${baseUrl}/api/v1.0/users/me/`;
+    const response = await fetch(url, {
+      method: 'GET',
+      headers: this.buildAuthHeaders(url),
+    });
+    if (response.status === 401 || response.status === 403) {
+      throw new DocsError(
+        'AUTH_REQUIRED',
+        this.buildAuthRequiredMessage('invalid_at_set'),
+      );
+    }
+    if (!response.ok) {
+      throw new Error(
+        `Unexpected response ${response.status} from GET ${url}`,
+      );
+    }
+    return (await response.json()) as Record<string, unknown>;
   }
 
   // -----------------------------------------------------------------
@@ -383,10 +453,21 @@ export class DocsRestClient {
       headers,
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
-    if (response.status === 401 || response.status === 403) {
+    // 401 vs 403 : on les traite séparément. Avant on les confondait sous
+    // AUTH_REQUIRED, ce qui faisait remonter le tutoriel cookies à l'agent
+    // alors que ses credentials étaient parfaitement valides — il n'a juste
+    // pas le droit de faire CETTE opération sur CE doc.
+    // / 401 = expired session, 403 = valid creds but operation forbidden.
+    if (response.status === 401) {
       throw new DocsError(
         'AUTH_REQUIRED',
         this.buildAuthRequiredMessage('expired_or_invalid'),
+      );
+    }
+    if (response.status === 403) {
+      throw new DocsError(
+        'PERMISSION_DENIED',
+        await this.buildPermissionDeniedMessage(response, `${method} ${url}`),
       );
     }
     if (!response.ok) {
@@ -397,6 +478,39 @@ export class DocsRestClient {
     return response;
   }
 
+  /**
+   * Construit le message d'erreur d'une 403, en récupérant si possible
+   * le détail Django (clé "detail" dans la réponse JSON DRF) qui indique
+   * souvent la permission précise refusée.
+   * / Builds the 403 error message, including Django's "detail" field
+   * / from the DRF response when available.
+   */
+  private async buildPermissionDeniedMessage(
+    response: Response,
+    operation: string,
+  ): Promise<string> {
+    let serverDetail = '';
+    try {
+      const body = (await response.clone().json()) as { detail?: string };
+      if (body.detail) {
+        serverDetail = `\nMessage du serveur : ${body.detail}`;
+      }
+    } catch {
+      // Pas de body JSON exploitable — pas grave, on renvoie un message
+      // générique. Django renvoie habituellement du JSON sur les 403 DRF
+      // mais on protège contre les cas où ce serait du HTML.
+      // / No usable JSON body — fall back to generic message.
+    }
+    return `Le serveur a refusé l'opération avec un code 403 (Forbidden) sur ${operation}.
+
+Tes credentials sont valides — sinon tu aurais reçu un 401 (AUTH_REQUIRED). Mais l'utilisateur connecté n'a pas la permission précise nécessaire pour cette opération.
+
+Causes fréquentes :
+- Pour create_document avec parent_id : il faut la permission "children_create" sur le doc parent. Vérifie en navigateur si tu peux créer un sous-doc sous ce parent via l'UI.
+- Pour delete_document, move_document, duplicate_document : permissions de gestion (destroy, manage) sur le doc.
+- Pour update_block / insert_block / delete_block : ce sont des ops Yjs (WebSocket), pas REST — un 403 ici ne devrait pas arriver pour ces tools.${serverDetail}`;
+  }
+
   private async postJson<T>(url: string, body: unknown): Promise<T> {
     const response = await this.requestWithAuth(url, 'POST', body);
     if (response.status === 204) {
@@ -405,10 +519,30 @@ export class DocsRestClient {
     return (await response.json()) as T;
   }
 
-  private buildAuthRequiredMessage(variant: 'missing' | 'expired_or_invalid' = 'missing'): string {
-    const lead = variant === 'expired_or_invalid'
-      ? 'Les credentials de session ont expiré ou sont invalides. Recolle-moi des nouvelles valeurs.'
-      : 'Cette opération nécessite un cookie de session valide.';
+  private buildAuthRequiredMessage(
+    variant: 'missing' | 'expired_or_invalid' | 'invalid_at_set' = 'missing',
+  ): string {
+    let lead: string;
+    if (variant === 'expired_or_invalid') {
+      lead = 'Les credentials de session ont expiré ou sont invalides. Recolle-moi des nouvelles valeurs.';
+    } else if (variant === 'invalid_at_set') {
+      // Cas spécifique : on vient juste de poser des cookies via
+      // set_session_credentials, et le ping /users/me/ a renvoyé 401/403.
+      // Avant de renvoyer ce message, on a pris soin de clear les creds
+      // côté MCP — donc l'état est propre, l'agent peut re-set.
+      // / Specific to the post-set verification ping that came back 401/403.
+      lead = `Les cookies que tu viens de me passer ne sont pas reconnus par le serveur Docs (GET /api/v1.0/users/me/ a retourné 401/403). Les credentials ont été automatiquement vidés côté MCP — tu n'es pas authentifié.
+
+⚠️ Attention au piège qui peut être trompeur : beaucoup de docs Docs sont en lien public/editor, donc des tools comme read_document, insert_block, update_block et delete_block continuent de fonctionner SANS authentification (n'importe qui peut éditer). Si tu vois ces tools réussir avec des cookies morts, c'est l'accès anonyme via le lien public — pas tes credentials. Seul create_document (et les autres ops REST authentifiées : delete_document, move_document, etc.) révèle la mort de la session.
+
+Causes fréquentes pour des cookies refusés :
+- Mauvaise copie : espaces autour de la valeur, troncature, copie d'une autre ligne (csrftoken vs docs_sessionid mélangés).
+- Cookies copiés depuis une autre instance Docs (vérifie le domaine dans DevTools).
+- Session expirée entre la copie et le set (la session Docs vit ~12h, parfois moins selon l'instance).
+- Déconnexion ailleurs : si tu te déconnectes dans un autre onglet/navigateur, la session est invalidée partout.`;
+    } else {
+      lead = 'Cette opération nécessite un cookie de session valide.';
+    }
     return `${lead}
 
 Pour récupérer tes 2 cookies sur l'instance Docs cible :
