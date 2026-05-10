@@ -48,7 +48,13 @@ function getSessionManager(): SessionManager {
         "Aucune instance Docs n'est configurée. Passe-moi un lien complet vers un document (ex: https://notes.liiib.re/docs/<UUID>/).",
       );
     }
-    sessionManager = new SessionManager(origin, sessionTtlMs, syncTimeoutMs, credentialsStore);
+    sessionManager = new SessionManager(
+      origin,
+      sessionTtlMs,
+      syncTimeoutMs,
+      credentialsStore,
+      docsRestClient,
+    );
   }
   return sessionManager;
 }
@@ -169,7 +175,7 @@ const toolDefinitionList = [
   // v0.1 édition contenu
   {
     name: 'insert_block',
-    description: 'Insère un nouveau bloc (paragraph ou heading) dans un document. Le champ `content.text` accepte du **markdown inline** : **gras**, *italique*, `code inline`, ~~barré~~, [texte](url). Si `after_block_id` est fourni, insertion juste après ce bloc ; sinon, insertion en tête du document. Référence du document : doc_id (UUID nu) OU doc_url (URL complète comme https://notes.liiib.re/docs/<UUID>/).',
+    description: 'Insère un nouveau bloc (paragraph ou heading) dans un document. Le champ `content.text` accepte du **markdown inline** : **gras**, *italique*, `code inline`, ~~barré~~, [texte](url). Si `after_block_id` est fourni, insertion juste après ce bloc ; sinon, insertion en tête du document. Référence du document : doc_id (UUID nu) OU doc_url (URL complète comme https://notes.liiib.re/docs/<UUID>/). PERSISTANCE : en mode authentifié (set_session_credentials posé), l\'écriture est garantie via PATCH /content/. En mode anonyme, la persistance n\'est PAS garantie — il faut que l\'utilisateur ait l\'onglet ouvert dans son navigateur (la réponse contiendra alors un champ `warning` à transmettre à l\'utilisateur).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -209,7 +215,7 @@ const toolDefinitionList = [
   },
   {
     name: 'update_block',
-    description: 'Remplace le contenu textuel d\'un bloc existant. Le texte est interprété comme du **markdown inline** (mêmes marqueurs que insert_block). Le type/niveau du bloc ne change pas — pour changer le type, fais delete_block puis insert_block.',
+    description: 'Remplace le contenu textuel d\'un bloc existant. Le texte est interprété comme du **markdown inline** (mêmes marqueurs que insert_block). Le type/niveau du bloc ne change pas — pour changer le type, fais delete_block puis insert_block. PERSISTANCE : voir insert_block (idem — garantie en mode authentifié, best-effort en mode anonyme avec navigateur humain ouvert).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -223,7 +229,7 @@ const toolDefinitionList = [
   },
   {
     name: 'delete_block',
-    description: 'Supprime un bloc d\'un document.',
+    description: 'Supprime un bloc d\'un document. PERSISTANCE : voir insert_block (garantie en mode authentifié, best-effort en mode anonyme avec navigateur humain ouvert).',
     inputSchema: {
       type: 'object',
       properties: {
@@ -293,9 +299,71 @@ const toolDefinitionList = [
 ];
 
 // -------- Création du serveur MCP
+
+/**
+ * Mode d'emploi global injecté dans le system prompt de l'agent au démarrage.
+ * Le client MCP (Claude Desktop, Claude Code) lit ce texte une fois à
+ * `initialize` et le réutilise à chaque turn — donc il est mis en cache
+ * côté agent. Important pour éviter les pièges connus du protocole Docs.
+ * / Global instructions injected into the agent's system prompt at MCP
+ * / initialize. Cached by the client and visible to the agent at every
+ * / turn — used to prevent known protocol pitfalls.
+ */
+const MCP_INSTRUCTIONS = `# lasuite-docs-mcp — mode d'emploi
+
+Ce serveur expose 16 tools pour lire et éditer des documents la-suite Docs (instances type notes.numerique.gouv.fr, notes.liiib.re, etc.). Édition fine au niveau du paragraphe, compatible avec la collaboration temps réel des éditeurs humains.
+
+## Workflows clés
+
+**Lecture/édition d'un doc public** : pas besoin de credentials. L'utilisateur te donne un lien type \`https://<instance>/docs/<UUID>/\`, tu peux directement appeler read_document, insert_block, etc.
+
+**Édition authentifiée (recommandée)** : appelle \`set_session_credentials\` AVANT les opérations qui exigent une vraie identité Django (create_document, delete_document, move_document, duplicate_document, update_document_title, list_my_documents). Le tool ping \`/api/v1.0/users/me/\` immédiatement et te retourne l'identité reconnue par le serveur — vérifie que le \`user.email\` retourné correspond bien à l'utilisateur attendu.
+
+## ⚠️ Piège critique : "auth muet" via lien public
+
+Beaucoup de docs Docs sont en \`computed_link_reach: public\` avec \`computed_link_role: editor\`. Tout le monde peut les lire et les éditer SANS authentification.
+
+→ Si tu vois \`read_document\`, \`insert_block\`, \`update_block\`, \`delete_block\` réussir avec des cookies invalides ou absents, ce N'EST PAS la preuve que tes cookies sont valides. Seules les opérations REST authentifiées (création/suppression/déplacement de docs) révèlent l'absence d'authentification.
+
+→ Pour être sûr d'être authentifié : utilise \`set_session_credentials\` qui ping \`/users/me/\` immédiatement, ou tente \`create_document\`.
+
+## ⚠️ Piège critique : persistance des écritures en mode anonyme
+
+Le serveur Hocuspocus de Docs n'a AUCUN mécanisme de persistance automatique. La persistance vers le snapshot REST (champ \`content\`) est faite par le client navigateur (frontend BlockNote, save loop toutes les 60s).
+
+- **En mode authentifié** (cookies posés) : le MCP fait un \`PATCH /api/v1.0/documents/{id}/\` avec le state Yjs encodé après chaque write → persistance garantie côté serveur.
+- **En mode anonyme** : le PATCH est refusé par Django → aucune persistance directe possible. Si AUCUN humain n'a le doc ouvert dans son navigateur au moment du write, le serveur peut décharger le doc de sa mémoire avant qu'aucun snapshot ne soit fait → l'écriture est perdue.
+
+→ En mode anonyme, la sortie de chaque write contient un champ \`warning\` qui rappelle à l'utilisateur de garder l'onglet ouvert. **Transmets ce warning à l'utilisateur final.**
+
+## Codes d'erreur
+
+- \`AUTH_REQUIRED\` : pose des cookies via set_session_credentials (le tool ping /users/me/ pour les valider immédiatement)
+- \`PERMISSION_DENIED\` : tes cookies sont valides, mais l'opération est refusée par les permissions Django sur ce doc précis. Le message inclut souvent le \`detail\` Django avec la raison exacte
+- \`DOC_READONLY\` : l'utilisateur connecté n'a pas le droit d'éditer ce doc
+- \`DOC_NOT_FOUND\` / \`BLOCK_NOT_FOUND\` : ID invalide ou doc/bloc supprimé
+- \`INSTANCE_NOT_SET\` : passe-moi un \`doc_url\` complet (https://<instance>/docs/<UUID>/) pour settle l'instance, ou définir DOCS_INSTANCE_URL côté config
+- \`INSTANCE_MISMATCH\` : tu cibles un autre serveur que celui actuellement settled — appelle clear_session_credentials d'abord
+
+## Markdown inline supporté
+
+Les paramètres \`text\` de \`insert_block\` et \`update_block\` sont interprétés comme du **markdown inline** :
+- \`**gras**\`, \`*italique*\`, \`\`\`code\`\`\`, \`~~barré~~\`, \`[texte](url)\`
+- \`read_document\` retourne le contenu en markdown : tu peux lire un bloc, modifier la chaîne, la réinjecter via update_block sans perte (round-trip propre).
+
+## Co-édition live
+
+Tu partages le même Y.Doc CRDT temps réel que les humains connectés au même doc dans leur navigateur :
+- Tes \`insert_block\` apparaissent **instantanément** dans le navigateur de l'utilisateur connecté.
+- Les frappes humaines sont visibles au prochain \`read_document\` de ta part.
+- Conflits gérés automatiquement par le CRDT — pas d'écrasement.
+
+→ Cas d'usage typique : « rédige la section X pendant que je tape la section Y » sur le même doc.
+`;
+
 const mcpServer = new Server(
-  { name: 'lasuite-docs-mcp', version: '0.3.0' },
-  { capabilities: { tools: {} } },
+  { name: 'lasuite-docs-mcp', version: '0.4.0' },
+  { capabilities: { tools: {} }, instructions: MCP_INSTRUCTIONS },
 );
 
 mcpServer.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -334,21 +402,21 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
           input.content,
           input.after_block_id ?? null,
         );
-        return formatToolSuccess({ block_id: blockId });
+        return formatToolSuccess(withAnonymousPersistenceWarning({ block_id: blockId }));
       }
       case 'update_block': {
         const input = updateBlockInputSchema.parse(rawArgs);
         const docId = resolveDocumentReference(input);
         await docsRestClient.assertPublicEditor(docId);
         await getSessionManager().updateBlockText(docId, input.block_id, input.text);
-        return formatToolSuccess({ ok: true });
+        return formatToolSuccess(withAnonymousPersistenceWarning({ ok: true }));
       }
       case 'delete_block': {
         const input = deleteBlockInputSchema.parse(rawArgs);
         const docId = resolveDocumentReference(input);
         await docsRestClient.assertPublicEditor(docId);
         await getSessionManager().deleteBlock(docId, input.block_id);
-        return formatToolSuccess({ ok: true });
+        return formatToolSuccess(withAnonymousPersistenceWarning({ ok: true }));
       }
       case 'set_session_credentials': {
         const input = setSessionCredentialsInputSchema.parse(rawArgs);
@@ -481,6 +549,38 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
 function formatToolSuccess(payload: unknown) {
   return {
     content: [{ type: 'text' as const, text: JSON.stringify(payload, null, 2) }],
+  };
+}
+
+/**
+ * Si la session MCP est anonyme (pas de cookies posés), enrichit la
+ * réponse d'un write avec un avertissement clair : la persistance n'est
+ * pas garantie — le serveur Hocuspocus de Docs n'a aucun mécanisme de
+ * persistance automatique, et le snapshot REST n'est mis à jour que
+ * quand un client navigateur (humain) déclenche son save loop. Si
+ * personne n'a le doc ouvert dans son navigateur au moment où l'agent
+ * écrit, le serveur peut décharger le doc de sa mémoire avant qu'aucun
+ * snapshot n'ait été persisté → l'écriture est perdue.
+ * / If the MCP session is anonymous, attaches a clear warning to write
+ * / responses: persistence is not guaranteed — Docs' Hocuspocus has no
+ * / automatic persistence, the REST snapshot only updates when a browser
+ * / client runs its save loop. Anonymous writes are best-effort.
+ *
+ * En mode authentifié, le SessionManager appelle PATCH /content/ après
+ * chaque write — la persistence est alors garantie côté serveur.
+ * / In authenticated mode, SessionManager PATCHes /content/ after each
+ * / write — persistence is then guaranteed server-side.
+ */
+function withAnonymousPersistenceWarning<T extends object>(
+  payload: T,
+): T | T & { warning: string } {
+  if (credentialsStore.has()) {
+    return payload;
+  }
+  return {
+    ...payload,
+    warning:
+      "⚠️ Mode anonyme : pour que cette modification soit persistée durablement, l'utilisateur doit garder l'onglet du document ouvert dans son navigateur (le frontend humain déclenche le save toutes les 60s). Sinon, le serveur Hocuspocus peut perdre l'écriture en déchargeant le doc de sa mémoire — le prochain visiteur verra l'ancien contenu. Pour une persistance garantie sans dépendance au navigateur humain, demande à l'utilisateur de poser ses cookies via set_session_credentials : le MCP fera alors un PATCH /content/ après chaque écriture.",
   };
 }
 

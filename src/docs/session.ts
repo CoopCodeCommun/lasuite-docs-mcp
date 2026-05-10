@@ -29,6 +29,7 @@ import { appendInlineMarkdownToParent } from './markdown.js';
 import { DocsError } from '../types.js';
 import type { DocumentId } from '../types.js';
 import type { CredentialsStore } from '../auth/credentials.js';
+import type { DocsRestClient } from './client.js';
 
 /**
  * Représentation interne d'une session Yjs ouverte.
@@ -57,6 +58,14 @@ export class SessionManager {
     private readonly sessionTtlMs: number,
     private readonly syncTimeoutMs: number,
     credentialsStore?: CredentialsStore,
+    // Optionnel : si fourni, sert à hydrater le Y.Doc local depuis le
+    // snapshot REST AVANT d'ouvrir la WebSocket Hocuspocus. Sans cette
+    // hydratation, on récupère un Y.Doc vide quand aucun autre client
+    // (humain ou bot) n'est déjà connecté au doc — le serveur Hocuspocus
+    // de la-suite Docs ne charge pas le snapshot REST tout seul.
+    // / Optional: if provided, used to seed the local Y.Doc from the REST
+    // / snapshot before opening the Hocuspocus WS.
+    private readonly docsRestClient?: DocsRestClient,
   ) {
     this.docsWebSocketClass = createDocsWebSocketClass(
       docsInstanceUrl,
@@ -102,6 +111,20 @@ export class SessionManager {
   ): Promise<OpenYjsSession> {
     const yjsDocument = new Y.Doc({ guid: documentIdentifier });
 
+    // Hydrate le Y.Doc local depuis le snapshot REST avant la WebSocket.
+    // C'est ce que fait le frontend BlockNote dans le navigateur : il
+    // GET le doc en REST, applique le binaire Yjs (champ `content`) sur
+    // son Y.Doc local, puis ouvre la WS. Sans ça, si le serveur Hocuspocus
+    // n'a personne d'autre sur le doc, il instancie un Y.Doc vide et nous
+    // sync ce vide — on perd les 47 paragraphes existants côté serveur.
+    // Yjs étant un CRDT, l'hydratation locale + sync WS fusionneront sans
+    // conflit même si un autre client est déjà connecté.
+    // / Seed the local Y.Doc from the REST snapshot before connecting the
+    // / WebSocket. Mirrors what BlockNote does in the browser. Hocuspocus
+    // / does not hydrate the collaborative Y.Doc from REST on its own
+    // / when no other client is connected.
+    await this.hydrateFromRestSnapshot(documentIdentifier, yjsDocument);
+
     // Construit l'URL WebSocket à partir de l'URL HTTPS de l'instance.
     // / Build WS URL from instance HTTPS URL.
     const websocketUrl = this.buildWebSocketUrl(documentIdentifier);
@@ -130,6 +153,56 @@ export class SessionManager {
       websocketProvider,
       lastUsedTimestamp: Date.now(),
     };
+  }
+
+  /**
+   * Hydrate un Y.Doc neuf à partir du snapshot REST du serveur Docs.
+   * / Hydrate a fresh Y.Doc from the Docs REST snapshot.
+   *
+   * Le serveur Hocuspocus de la-suite Docs ne charge PAS automatiquement
+   * le contenu Yjs depuis la base quand un client se connecte sur un doc
+   * "froid" (aucun autre client sur le doc). Il instancie un Y.Doc vide
+   * et sync ce vide. Pour que le MCP voit le contenu réel, il faut donc
+   * d'abord récupérer le snapshot REST (champ `content`, base64 Yjs
+   * binaire) et l'appliquer sur notre Y.Doc local.
+   *
+   * Comportement défensif : si le client REST n'est pas configuré, ou si
+   * le fetch échoue (réseau, 404, 401/403), on continue sans hydrater.
+   * Le sync WS qui suit pourra peut-être quand même charger du contenu
+   * (cas où un autre client est connecté en parallèle), ou échouer
+   * proprement si on n'a pas accès au doc.
+   * / Defensive: if REST fetch fails, continue without hydration.
+   */
+  private async hydrateFromRestSnapshot(
+    documentIdentifier: DocumentId,
+    yjsDocument: Y.Doc,
+  ): Promise<void> {
+    if (!this.docsRestClient) {
+      return;
+    }
+    let documentMetadata;
+    try {
+      documentMetadata = await this.docsRestClient.fetchDocumentMetadata(
+        documentIdentifier,
+      );
+    } catch {
+      // On laisse le sync WS gérer l'erreur (auth, 404, etc.) avec ses
+      // propres codes. L'hydratation est best-effort.
+      // / Let the WS sync handle the error with its own error codes.
+      return;
+    }
+    const contentBase64 = documentMetadata.content;
+    if (!contentBase64) {
+      // Doc sans contenu : Y.Doc reste vide, c'est l'état attendu.
+      // / Empty doc: leave the Y.Doc empty.
+      return;
+    }
+    // Décode le base64 en binaire Yjs et applique sur le Y.Doc local.
+    // Y.applyUpdate est idempotent et CRDT-safe : si le sync WS qui
+    // suit reçoit un état différent, Yjs converge sans conflit.
+    // / Decode base64 to Yjs binary and apply to local Y.Doc. CRDT-safe.
+    const updateBinary = Buffer.from(contentBase64, 'base64');
+    Y.applyUpdate(yjsDocument, new Uint8Array(updateBinary));
   }
 
   /**
@@ -294,6 +367,14 @@ export class SessionManager {
     // / Without this, a short-lived MCP process can drop the update.
     await this.awaitFlush(openSession.hocuspocusProvider);
 
+    // Persiste l'état complet du Y.Doc dans le snapshot REST. Sans ça,
+    // l'update est seulement en mémoire Hocuspocus — il sera perdu quand
+    // le serveur unloade le doc (au départ du dernier client). Skip
+    // silencieux en mode anonyme.
+    // / Persist the full Y.Doc state to the REST snapshot. Otherwise the
+    // / update lives only in Hocuspocus memory and is lost on unload.
+    await this.persistContentToRest(documentIdentifier, openSession.yjsDocument);
+
     return newBlockIdentifier;
   }
 
@@ -344,6 +425,10 @@ export class SessionManager {
     // Flush pour garantir la propagation au serveur (cf. insertBlock).
     // / Flush to guarantee server propagation (see insertBlock).
     await this.awaitFlush(openSession.hocuspocusProvider);
+
+    // Persistence explicite vers le snapshot REST (cf. insertBlock).
+    // / Explicit persistence to the REST snapshot.
+    await this.persistContentToRest(documentIdentifier, openSession.yjsDocument);
   }
 
   /**
@@ -386,6 +471,55 @@ export class SessionManager {
     // Flush pour garantir la propagation au serveur (cf. insertBlock).
     // / Flush to guarantee server propagation (see insertBlock).
     await this.awaitFlush(openSession.hocuspocusProvider);
+
+    // Persistence explicite vers le snapshot REST (cf. insertBlock).
+    // / Explicit persistence to the REST snapshot.
+    await this.persistContentToRest(documentIdentifier, openSession.yjsDocument);
+  }
+
+  /**
+   * Persiste l'état complet du Y.Doc dans le snapshot REST de Docs via
+   * PATCH /api/v1.0/documents/{id}/content/. Imite ce que fait le
+   * frontend BlockNote dans son save loop.
+   * / Persists the full Y.Doc state to the REST snapshot.
+   *
+   * Pourquoi : Hocuspocus côté serveur Docs n'a aucune persistence
+   * automatique. Sans ce PATCH, les writes du MCP restent uniquement
+   * dans la RAM serveur tant qu'aucun humain ne déclenche son save
+   * loop côté navigateur. Si Hocuspocus unload le doc avant, les
+   * writes sont perdus, et le prochain humain qui ouvre le doc
+   * réhydrate depuis un snapshot REST stale qui ne contient pas
+   * les writes du MCP.
+   * / Hocuspocus has no built-in persistence. Without this PATCH,
+   * / MCP writes are lost on doc unload if no human is active.
+   *
+   * Comportement quand on n'a pas de DocsRestClient configuré, ou
+   * quand le client REST est en mode anonyme : skip silencieux. La
+   * persistence retombe alors sur le save loop des humains
+   * potentiellement connectés.
+   * / Silent skip if no REST client or anonymous mode.
+   */
+  private async persistContentToRest(
+    documentIdentifier: DocumentId,
+    yjsDocument: Y.Doc,
+  ): Promise<void> {
+    if (!this.docsRestClient) {
+      return;
+    }
+    // Encode l'état complet du Y.Doc en binaire Yjs, puis en base64.
+    // C'est exactement le format attendu par le PATCH /content/.
+    // / Encode full Y.Doc state as Yjs binary, then base64.
+    const stateBinary = Y.encodeStateAsUpdate(yjsDocument);
+    const stateBase64 = Buffer.from(stateBinary).toString('base64');
+    // Le flag `websocket: true` signale au backend Django qu'on est
+    // bien connecté au serveur de collab — sinon Django peut considérer
+    // le PATCH comme suspect (cf. setting COLLABORATION_WS_NOT_CONNECTED_READY_ONLY).
+    // / `websocket: true` tells Django we are connected to collab WS.
+    await this.docsRestClient.patchDocumentContent(
+      documentIdentifier,
+      stateBase64,
+      true,
+    );
   }
 
   /**

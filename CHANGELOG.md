@@ -1,5 +1,43 @@
 # Changelog
 
+## 4. Persistance garantie + robustesse de l'authentification + instructions MCP / Guaranteed persistence + auth robustness + MCP instructions
+
+**Date :** 2026-05-10
+**Version :** 0.4.0
+
+**Quoi / What :**
+- **Persistance garantie côté serveur (le big fix)** : après chaque écriture Yjs (`insert_block`, `update_block`, `delete_block`) en mode authentifié, le MCP fait un `PATCH /api/v1.0/documents/{id}/` avec le state Yjs complet encodé en base64 et `websocket: true`. Imite le save loop du frontend BlockNote (60s). Sans ce PATCH, les écritures du MCP restaient uniquement en RAM Hocuspocus côté serveur (qui n'a aucun callback de persistance) et étaient perdues quand le serveur déchargeait le doc de sa mémoire.
+- **Hydratation depuis REST snapshot avant la WebSocket** : `openNewSession` fetch le `content` REST et l'applique au Y.Doc local AVANT d'ouvrir la WS Hocuspocus. Sans ça, quand le serveur Hocuspocus est froid (aucun client humain en parallèle), le sync WS retourne un Y.Doc vide alors que le doc est rempli — `read_document` retournait `blocks: []` à tort.
+- **Vérification immédiate des credentials au `set_session_credentials`** : ping `/api/v1.0/users/me/` synchrone après le set. Si le serveur dit non, clear automatique et lève `AUTH_REQUIRED` avec un message qui explique pourquoi d'autres tools peuvent quand même réussir (piège des docs publics). Empêche l'agent de croire qu'il est authentifié alors qu'il ne l'est pas.
+- **Distinction 401 vs 403** : nouveau code d'erreur `PERMISSION_DENIED`. Avant, les deux étaient confondus en `AUTH_REQUIRED`, ce qui poussait l'agent à reposer des cookies inutilement quand il s'agissait en réalité d'une permission Django manquante (ex: `children_create: false`). Le message inclut le champ `detail` Django quand présent.
+- **Cache WebSocket purgé au changement de credentials** : `set_session_credentials` et `clear_session_credentials` font maintenant un `shutdown()` du SessionManager. Avant, une WebSocket Hocuspocus ouverte avec un ancien cookie restait cachée 5 min même après le changement de credentials, et continuait à utiliser l'ancien cookie (le cookie est calculé uniquement au handshake WS). Bug pré-existant : le switch d'instance volontaire fuyait aussi des WebSocket — fixé au passage.
+- **Warning automatique sur les writes anonymes** : la sortie de `insert_block` / `update_block` / `delete_block` contient un champ `warning` clair en mode anonyme — l'agent doit le transmettre à l'utilisateur pour qu'il garde son onglet ouvert (sinon écriture potentiellement perdue, le PATCH /content/ exigeant l'auth).
+- **Instructions MCP au démarrage** : le serveur expose un mode d'emploi de ~600 tokens via le champ `instructions` du protocole MCP `initialize`. Cache côté client, lu à chaque turn de l'agent. Liste les pièges (auth muet, persistance anonyme), les codes d'erreur, le markdown inline, la co-édition live.
+- **Réponse de `set_session_credentials` enrichie** : retourne `{ok, user}` avec l'identité reconnue par le serveur (email, full_name) — l'agent peut ainsi vérifier qu'il est connecté sous le bon compte.
+
+**Pourquoi / Why :** Plusieurs bugs sérieux remontés en usage réel via Claude Desktop. Le plus grave : après plusieurs sessions d'écriture en autonomie, l'utilisateur retrouvait certains sous-documents complètement vides — les écritures de l'agent étaient perdues sans laisser de trace. Investigation : le serveur Hocuspocus de Docs n'a aucun mécanisme de persistance automatique, c'est le frontend navigateur qui sauvegarde toutes les 60s. Sans humain connecté en parallèle, les écritures du MCP étaient perdues quand Hocuspocus déchargeait le doc de sa mémoire. Le PATCH explicite après chaque write élimine cette dépendance. Les autres fixes (auth, cache WS) étaient des bugs latents découverts pendant l'investigation.
+
+### Fichiers modifiés / Modified files
+
+| Fichier / File | Changement / Change |
+|---|---|
+| `src/docs/client.ts` | Nouvelle méthode `verifyAuthenticatedUser` (ping `/users/me/`). Nouvelle méthode `patchDocumentContent` (persistance explicite vers REST). `fetchDocumentMetadata` retourne aussi `content`. `requestWithAuth` distingue 401 et 403 (nouveau `PERMISSION_DENIED` avec `detail` Django). Nouvelle méthode `buildPermissionDeniedMessage`. Variant `'invalid_at_set'` ajouté à `buildAuthRequiredMessage`. |
+| `src/docs/session.ts` | Nouvelle méthode privée `hydrateFromRestSnapshot` (Y.applyUpdate du snapshot REST avant la WS). Nouvelle méthode privée `persistContentToRest` (PATCH après chaque write). `insertBlock` / `updateBlockText` / `deleteBlock` appellent `persistContentToRest` après `awaitFlush`. Constructeur accepte un `DocsRestClient` optionnel. |
+| `src/server.ts` | `set_session_credentials` ping `/users/me/`, clear automatique en cas d'échec, retourne `{ok, user}`. `set_session_credentials` et `clear_session_credentials` purgent le SessionManager (shutdown des WS). Helper `withAnonymousPersistenceWarning` qui injecte un warning sur les writes anonymes. Constante `MCP_INSTRUCTIONS` exposée via `instructions` au handshake MCP. Descriptions de `insert_block`, `update_block`, `delete_block` enrichies de la note persistance. Bug pré-existant fixé : `sessionManager.shutdown()` ajouté avant le `null` au switch d'instance volontaire. |
+| `src/types.ts` | Nouveau code d'erreur `PERMISSION_DENIED`. |
+| `package.json` | Version `0.4.0`. |
+
+### Migration
+
+- **Migration nécessaire / Migration required :** Non / No
+- L'API publique des tools n'a pas changé. Les codes d'erreur déjà connus continuent d'arriver dans les mêmes scénarios. Les nouveautés sont additives :
+  - `PERMISSION_DENIED` apparaîtra à la place de `AUTH_REQUIRED` quand le serveur Django renvoie un 403 (permission refusée). L'agent doit traiter ce nouveau code (ne pas reposer de cookies, mais signaler à l'humain le manque de permission).
+  - Le champ `warning` apparaît seulement en mode anonyme sur les writes. À transmettre à l'utilisateur.
+  - La réponse de `set_session_credentials` contient maintenant un champ `user` avec l'identité validée — utile pour double-check.
+  - Si vous appeliez `set_session_credentials` avec des cookies morts, vous receviez avant `{ok: true}` (silencieux). Vous recevez maintenant un `AUTH_REQUIRED` immédiat. C'est le comportement correct mais c'est un changement de surface pour les agents qui se reposaient sur le `{ok: true}` muet.
+
+---
+
 ## 3. Support du markdown inline et fix race condition / Inline markdown support and race condition fix
 
 **Date :** 2026-05-09

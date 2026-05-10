@@ -56,6 +56,13 @@ export class DocsRestClient {
   ): Promise<DocumentSummary & {
     created_at: string;
     abilities: Record<string, boolean>;
+    // Yjs binary state encodé en base64 — utilisé pour l'hydratation
+    // initiale du Y.Doc local côté MCP (le serveur Hocuspocus ne pousse
+    // pas ce contenu si aucun autre client n'est connecté au moment où
+    // le MCP ouvre la WS).
+    // / Yjs binary state base64-encoded — used to seed the local Y.Doc
+    // / (Hocuspocus does not hydrate from REST snapshot on its own).
+    content?: string;
   }> {
     const baseUrl = this.requireInstanceOrThrow();
     const url = `${baseUrl}/api/v1.0/documents/${documentIdentifier}/`;
@@ -110,6 +117,7 @@ export class DocsRestClient {
     return (await apiResponse.json()) as DocumentSummary & {
       created_at: string;
       abilities: Record<string, boolean>;
+      content?: string;
     };
   }
 
@@ -271,6 +279,55 @@ export class DocsRestClient {
   ): Promise<void> {
     const url = this.buildAuthUrl(`/api/v1.0/documents/${documentIdentifier}/`);
     await this.requestWithAuth(url, 'PATCH', { title: newTitle });
+  }
+
+  /**
+   * Persiste explicitement l'état Yjs d'un document dans le snapshot REST
+   * (champ `content`, S3-backed). Imite ce que fait le frontend BlockNote
+   * dans son save loop de 60s.
+   * / Persists the Yjs state to the REST snapshot. Mirrors the BlockNote
+   * / 60s save loop in the browser frontend.
+   *
+   * Pourquoi : le serveur Hocuspocus de la-suite Docs n'a aucun mécanisme
+   * de persistence côté backend. Tant qu'aucun client humain n'est connecté
+   * et n'exécute SON save loop, le Y.Doc en mémoire serveur peut être
+   * unloaded sans avoir été persisté — les writes du MCP sont alors perdus.
+   * En appelant cet endpoint après chaque write Yjs, le MCP garantit la
+   * persistance côté serveur, indépendamment de la présence humaine.
+   * / Hocuspocus side has no persistence callback. Without an active
+   * / browser client, MCP writes are lost when the doc is unloaded. This
+   * / PATCH guarantees server-side persistence after each MCP write.
+   *
+   * Comportement quand non-authentifié : skip silencieusement (best-effort).
+   * Le PATCH /content/ exige des credentials valides côté Django ; en mode
+   * anonyme, on ne peut pas persister via cet endpoint et on doit compter
+   * sur le save loop d'un humain connecté en parallèle.
+   * / Silent skip when unauthenticated — the PATCH requires valid creds.
+   */
+  async patchDocumentContent(
+    documentIdentifier: DocumentId,
+    contentBase64: string,
+    isConnectedToCollabServer: boolean,
+  ): Promise<void> {
+    if (!this.credentialsStore.has()) {
+      // Mode anonyme : pas d'auth Django → PATCH refusé. On compte sur
+      // un humain connecté pour déclencher la persistence côté serveur.
+      // / Anonymous mode: no Django auth → PATCH refused. Rely on a human.
+      return;
+    }
+    // L'écriture passe par PATCH sur la ressource document elle-même
+    // (le serializer DRF Document accepte `content` dans le body), pas
+    // par la sous-ressource /content/ qui est read-only sur cette instance.
+    // / The write goes through PATCH on the document resource (the DRF
+    // / serializer accepts `content`). The /content/ sub-resource is
+    // / GET-only on this Docs instance.
+    const url = this.buildAuthUrl(
+      `/api/v1.0/documents/${documentIdentifier}/`,
+    );
+    await this.requestWithAuth(url, 'PATCH', {
+      content: contentBase64,
+      websocket: isConnectedToCollabServer,
+    });
   }
 
   async listMyDocuments(

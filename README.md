@@ -18,7 +18,14 @@ Pas de polling à coder côté agent, pas de mécanisme custom : c'est la nature
 
 ## Statut
 
-v0.3.0 — support du **markdown inline** sur les opérations d'édition (`**gras**`, `*italique*`, `` `code` ``, `~~barré~~`, `[lien](url)`), avec round-trip markdown sur `read_document`. Hérite de la v0.2.0 : authentification utilisateur (cookies de session + CSRF) et détection dynamique de l'instance. **16 tools** : lecture (incluant l'arborescence des descendants), édition de contenu en markdown, gestion de l'arborescence, authentification.
+v0.4.0 — **persistance garantie** des écritures côté serveur (PATCH `/api/v1.0/documents/{id}/` automatique après chaque write authentifié, comme le frontend BlockNote), **vérification immédiate** des cookies au `set_session_credentials` (ping `/users/me/`, refus immédiat si invalides), **distinction 401/403** (nouveau code `PERMISSION_DENIED` pour les vraies permissions refusées), **hydratation REST** avant la WebSocket pour les docs froids, et **instructions MCP** au démarrage qui expliquent les pièges du protocole Docs à l'agent. Hérite de la v0.3.0 : markdown inline sur les opérations d'édition (`**gras**`, `*italique*`, `` `code` ``, `~~barré~~`, `[lien](url)`) avec round-trip propre sur `read_document`. **16 tools** : lecture (incluant l'arborescence), édition de contenu en markdown, gestion de l'arborescence, authentification.
+
+### ⚠️ Persistance des écritures
+
+Le serveur Hocuspocus de Docs **n'a aucun mécanisme de persistance automatique** : c'est le frontend BlockNote qui sauvegarde toutes les 60s côté navigateur. Pour que le MCP soit fiable en autonomie (sans humain connecté en parallèle), il **fait lui-même un PATCH** sur le document après chaque write Yjs.
+
+- **En mode authentifié** (cookies posés via `set_session_credentials`) : persistance garantie, écritures fiables même sans humain connecté.
+- **En mode anonyme** (sans cookies, doc public en `link_role: editor`) : le PATCH est refusé par Django. La persistance dépend alors d'un humain qui a le doc ouvert dans son navigateur — sinon, l'écriture est perdue. Le MCP retourne un champ `warning` clair à l'agent dans ce cas.
 
 ## Tools MCP exposés
 
