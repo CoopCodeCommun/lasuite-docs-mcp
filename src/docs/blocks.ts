@@ -121,6 +121,20 @@ function blockContainerToBlock(
       text: concatenatedText,
     };
   }
+  if (blockNodeName === 'image') {
+    // Bloc image standard BlockNote : les infos sont dans les attributs
+    // (url, caption, name), pas dans le texte. Le texte concaténé est
+    // toujours vide pour ce type.
+    // / BlockNote standard image block: info is in attributes.
+    return {
+      id: blockIdentifier,
+      type: 'image',
+      text: '',
+      url: blockContentElement.getAttribute('url') ?? '',
+      name: blockContentElement.getAttribute('name') ?? '',
+      caption: blockContentElement.getAttribute('caption') ?? '',
+    };
+  }
 
   // Type inconnu en v1 : on expose l'id et le texte pour que l'agent
   // puisse au moins le voir, sans pouvoir l'éditer.
@@ -277,6 +291,47 @@ export function buildBlockContainer(
   // 3. Insère le contenu dans le container.
   // / Insert content into the container.
   newBlockContainer.insert(0, [contentElement]);
+
+  return newBlockContainer;
+}
+
+/**
+ * Construit un Y.XmlElement de type blockContainer contenant un bloc
+ * image BlockNote. L'id du container est généré automatiquement.
+ * / Builds a blockContainer Y.XmlElement holding a BlockNote image block.
+ *
+ * Le bloc image n'a pas de contenu texte interne : tout est dans les
+ * attributs (url, name, caption). Pas besoin du pattern
+ * build → attach → populate qui sert pour les marks Yjs des paragraphes.
+ * / Image blocks have no inline text — all info is in attributes.
+ *
+ * @param imageProperties - url (REST media), name (filename), caption optionnelle
+ * @returns Un Y.XmlElement blockContainer non encore attaché
+ */
+export function buildImageBlockContainer(
+  imageProperties: {
+    url: string;
+    name: string;
+    caption?: string;
+  },
+): Y.XmlElement {
+  const newBlockContainer = new Y.XmlElement('blockContainer');
+  newBlockContainer.setAttribute('id', randomUUID());
+  newBlockContainer.setAttribute('backgroundColor', 'default');
+  newBlockContainer.setAttribute('textColor', 'default');
+
+  // Élément <image> avec props standard BlockNote.
+  // / <image> element with standard BlockNote props.
+  const imageElement = new Y.XmlElement('image');
+  imageElement.setAttribute('url', imageProperties.url);
+  imageElement.setAttribute('name', imageProperties.name);
+  imageElement.setAttribute('caption', imageProperties.caption ?? '');
+  imageElement.setAttribute('showPreview', 'true');
+  imageElement.setAttribute('previewWidth', '512');
+  imageElement.setAttribute('backgroundColor', 'default');
+  imageElement.setAttribute('textAlignment', 'left');
+
+  newBlockContainer.insert(0, [imageElement]);
 
   return newBlockContainer;
 }

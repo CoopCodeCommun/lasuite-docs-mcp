@@ -1,5 +1,37 @@
 # Changelog
 
+## 5. Upload d'images / Image upload
+
+**Date :** 2026-05-10
+**Version :** 0.5.0
+
+**Quoi / What :**
+- **Nouveau tool `insert_image`** : permet à l'agent d'uploader une image (PNG, JPEG, GIF, WebP, SVG) en base64 et de l'insérer comme bloc image BlockNote dans un document. La surface MCP passe à **17 tools**.
+- **Pipeline complet** : `POST /api/v1.0/documents/{id}/attachment-upload/` (multipart/form-data, champ `file`) → l'API retourne une URL `media-check` (polling antivirus) → bloc image inséré dans le Y.Doc avec cette URL → BlockNote remplace automatiquement par l'URL S3 finale après scan.
+- **Lecture des images existantes** : `read_document` reconnaît désormais les blocs `image` et retourne `{type: 'image', url, name, caption, text: ''}` au lieu de `{type: 'unknown'}`. L'agent voit les images déjà présentes dans un doc.
+- **Permissions** : exige `attachment_upload` côté Docs (équivalent `can_update`). Marche en mode authentifié et — si le doc est public-editor — en mode anonyme avec le warning persistance habituel.
+
+**Pourquoi / Why :** Les agents IA produisent fréquemment des images (diagrammes, captures, illustrations générées). Sans support upload, ils devaient demander à l'utilisateur de coller manuellement les images, cassant le flux d'édition autonome. L'upload natif permet désormais de générer un schéma puis l'insérer en un seul appel d'outil.
+
+### Fichiers modifiés / Modified files
+
+| Fichier / File | Changement / Change |
+|---|---|
+| `src/types.ts` | Le type `Block` accepte désormais `{type: 'image', url, name, caption, text: ''}`. |
+| `src/docs/blocks.ts` | `blockContainerToBlock` reconnaît les `<image>` et retourne leurs props. Nouvelle fonction `buildImageBlockContainer(props)` qui construit le blockContainer + élément `<image>` avec les props standard BlockNote (url, name, caption, showPreview, previewWidth, etc.). |
+| `src/docs/client.ts` | Nouvelle méthode `uploadAttachment(docId, fileBuffer, fileName, mimeType)` : POST multipart/form-data sur `/attachment-upload/`, retourne l'URL absolue à utiliser dans le bloc. Headers manuels (pas de `buildAuthHeaders` pour préserver le boundary multipart). Gestion 401/403 cohérente avec le reste. |
+| `src/docs/session.ts` | Nouvelle méthode `insertImageBlock(docId, imageProps, afterBlockId)` : insère un bloc image préconstruit dans le Y.Doc avec `awaitFlush` + persistance REST. |
+| `src/server.ts` | Nouveau tool `insert_image` avec `insertImageInputSchema` (zod). Helper `guessMimeTypeFromFileName` pour deviner le MIME type depuis l'extension. Instructions MCP enrichies (mention de la feature image). Compteur `16 tools` → `17 tools`. |
+| `package.json` | Version `0.5.0`. |
+
+### Migration
+
+- **Migration nécessaire / Migration required :** Non / No
+- L'API publique des tools existants n'a pas changé. Les agents qui ne connaissent pas `insert_image` continuent de fonctionner identiquement.
+- `read_document` retourne maintenant `{type: 'image', ...}` au lieu de `{type: 'unknown'}` pour les blocs image existants. Les agents qui ne géraient pas explicitement `unknown` ne sont pas impactés ; ceux qui s'appuyaient sur `unknown` pour deviner les images doivent passer sur le type `image`.
+
+---
+
 ## 4. Persistance garantie + robustesse de l'authentification + instructions MCP / Guaranteed persistence + auth robustness + MCP instructions
 
 **Date :** 2026-05-10

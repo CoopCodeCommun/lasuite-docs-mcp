@@ -379,6 +379,50 @@ export class SessionManager {
   }
 
   /**
+   * Insère un bloc image dans le document. Le caller a déjà uploadé le
+   * fichier via DocsRestClient.uploadAttachment et nous passe l'URL.
+   * / Inserts an image block. The caller has already uploaded the file
+   * / via uploadAttachment and provides the URL.
+   */
+  async insertImageBlock(
+    documentIdentifier: DocumentId,
+    imageProperties: { url: string; name: string; caption?: string },
+    afterBlockIdentifier: BlockId | null,
+  ): Promise<BlockId> {
+    const openSession = await this.getOrCreate(documentIdentifier);
+    const documentFragment = openSession.yjsDocument.getXmlFragment(
+      'document-store',
+    );
+    const {
+      buildImageBlockContainer,
+      findOrCreateTopLevelBlockGroup,
+      findBlockContainerIndex,
+    } = await import('./blocks.js');
+
+    let newBlockIdentifier = '';
+
+    openSession.yjsDocument.transact(() => {
+      const topLevelBlockGroup = findOrCreateTopLevelBlockGroup(documentFragment);
+      const builtBlockContainer = buildImageBlockContainer(imageProperties);
+      const insertionIndex = computeInsertionIndex(
+        documentFragment,
+        afterBlockIdentifier,
+        findBlockContainerIndex,
+      );
+      topLevelBlockGroup.insert(insertionIndex, [builtBlockContainer]);
+      // L'image n'a pas de Y.XmlText à peupler — toutes les infos sont
+      // dans les attributs posés par buildImageBlockContainer.
+      // / No Y.XmlText to populate — image info is in attributes.
+      newBlockIdentifier = builtBlockContainer.getAttribute('id') ?? '';
+    });
+
+    await this.awaitFlush(openSession.hocuspocusProvider);
+    await this.persistContentToRest(documentIdentifier, openSession.yjsDocument);
+
+    return newBlockIdentifier;
+  }
+
+  /**
    * Remplace le texte d'un bloc existant.
    * / Replaces the text of an existing block.
    */

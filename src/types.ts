@@ -24,6 +24,18 @@ export type BlockId = string;
 export type Block =
   | { id: BlockId; type: 'paragraph'; text: string }
   | { id: BlockId; type: 'heading'; level: 1 | 2 | 3; text: string }
+  | {
+      id: BlockId;
+      type: 'image';
+      // text vide pour cohérence avec les autres types ; les vraies infos
+      // image sont dans url/name/caption.
+      // / text empty for consistency with other types; real info is in
+      // / url/name/caption.
+      text: '';
+      url: string;
+      name: string;
+      caption: string;
+    }
   | { id: BlockId; type: 'unknown'; text: string };
 
 // Contenu d'un bloc à insérer ou mettre à jour.

@@ -18,7 +18,7 @@ Pas de polling à coder côté agent, pas de mécanisme custom : c'est la nature
 
 ## Statut
 
-v0.4.0 — **persistance garantie** des écritures côté serveur (PATCH `/api/v1.0/documents/{id}/` automatique après chaque write authentifié, comme le frontend BlockNote), **vérification immédiate** des cookies au `set_session_credentials` (ping `/users/me/`, refus immédiat si invalides), **distinction 401/403** (nouveau code `PERMISSION_DENIED` pour les vraies permissions refusées), **hydratation REST** avant la WebSocket pour les docs froids, et **instructions MCP** au démarrage qui expliquent les pièges du protocole Docs à l'agent. Hérite de la v0.3.0 : markdown inline sur les opérations d'édition (`**gras**`, `*italique*`, `` `code` ``, `~~barré~~`, `[lien](url)`) avec round-trip propre sur `read_document`. **16 tools** : lecture (incluant l'arborescence), édition de contenu en markdown, gestion de l'arborescence, authentification.
+v0.5.0 — **upload d'images** : nouveau tool `insert_image` qui prend une image en base64, l'upload sur le storage S3 du document via `attachment-upload`, et l'insère comme bloc image BlockNote dans le Y.Doc. `read_document` retourne aussi les images existantes (type, url, name, caption). Hérite de v0.4.0 (persistance garantie via PATCH automatique, vérification immédiate des cookies, distinction 401/403, hydratation REST avant WS, instructions MCP) et v0.3.0 (markdown inline sur les opérations d'édition). **17 tools** : lecture (avec arborescence et images), édition de contenu en markdown, upload d'images, gestion de l'arborescence, authentification.
 
 ### ⚠️ Persistance des écritures
 
@@ -46,6 +46,7 @@ Le serveur Hocuspocus de Docs **n'a aucun mécanisme de persistance automatique*
 | `insert_block` | Insère un paragraphe ou heading. Le `text` est interprété comme du **markdown inline** (gras, italique, code, strike, liens) |
 | `update_block` | Modifie le texte d'un bloc existant. Idem : markdown inline supporté |
 | `delete_block` | Supprime un bloc |
+| `insert_image` | Upload une image (base64) sur le storage du doc et insère un bloc image. Formats supportés : PNG, JPEG, GIF, WebP, SVG. |
 
 **Format markdown supporté** sur les paramètres `text` de `insert_block` et `update_block` :
 

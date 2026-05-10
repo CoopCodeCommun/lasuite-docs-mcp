@@ -282,6 +282,91 @@ export class DocsRestClient {
   }
 
   /**
+   * Upload une image (ou autre attachment) vers le storage S3 du document.
+   * Retourne l'URL absolue à utiliser comme `url` dans un bloc BlockNote
+   * image. Cette URL pointe d'abord vers `media-check` (polling antivirus),
+   * puis BlockNote la remplace automatiquement par l'URL S3 finale quand
+   * le scan termine — donc on peut l'utiliser tout de suite.
+   * / Uploads an attachment to the document's S3 storage. Returns the
+   * / absolute URL to use as `url` in a BlockNote image block.
+   *
+   * Endpoint : POST /api/v1.0/documents/{id}/attachment-upload/
+   * Body : multipart/form-data avec un seul champ `file`.
+   * Response : { file: "/api/v1.0/documents/{id}/media-check/?key=<key>" }.
+   *
+   * Permissions : exige `attachment_upload` côté Django (équivalent à
+   * `can_update`). En anonyme sur un doc public-editor, ça peut marcher
+   * — sinon on récupère AUTH_REQUIRED ou PERMISSION_DENIED.
+   * / Permissions: requires `attachment_upload` (equivalent to can_update).
+   */
+  async uploadAttachment(
+    documentIdentifier: DocumentId,
+    fileBuffer: Buffer,
+    fileName: string,
+    mimeType: string,
+  ): Promise<string> {
+    const baseUrl = this.requireInstanceOrThrow();
+    const url = `${baseUrl}/api/v1.0/documents/${documentIdentifier}/attachment-upload/`;
+
+    // Construit un FormData avec le fichier en mémoire. fetch ajoute
+    // automatiquement le boundary multipart/form-data — on ne doit PAS
+    // forcer Content-Type ici, sinon le boundary serait absent.
+    // / Build FormData with the file. fetch sets the boundary itself.
+    const formData = new FormData();
+    const fileBlob = new Blob([new Uint8Array(fileBuffer)], { type: mimeType });
+    formData.append('file', fileBlob, fileName);
+
+    // Headers manuels pour ne PAS injecter Content-Type via buildAuthHeaders
+    // (sinon le boundary multipart serait écrasé). On garde Cookie + CSRF
+    // + Referer comme pour les autres ops authentifiées.
+    // / Manual headers — do NOT use buildAuthHeaders (it forces JSON CT).
+    const requestHeaders: Record<string, string> = {};
+    if (this.credentialsStore.has() && this.instanceStore.matches(url)) {
+      const credentials = this.credentialsStore.get()!;
+      const instanceOrigin = this.instanceStore.get()!;
+      requestHeaders.Cookie = `docs_sessionid=${credentials.docs_sessionid}; csrftoken=${credentials.csrftoken}`;
+      requestHeaders.Referer = `${instanceOrigin}/`;
+      requestHeaders['X-CSRFToken'] = credentials.csrftoken;
+    }
+
+    const response = await fetch(url, {
+      method: 'POST',
+      headers: requestHeaders,
+      body: formData,
+    });
+
+    if (response.status === 401) {
+      throw new DocsError(
+        'AUTH_REQUIRED',
+        this.buildAuthRequiredMessage(this.credentialsStore.has() ? 'expired_or_invalid' : 'missing'),
+      );
+    }
+    if (response.status === 403) {
+      throw new DocsError(
+        'PERMISSION_DENIED',
+        await this.buildPermissionDeniedMessage(response, `POST ${url}`),
+      );
+    }
+    if (!response.ok) {
+      throw new Error(
+        `Unexpected response ${response.status} from POST ${url}`,
+      );
+    }
+
+    const responseBody = (await response.json()) as { file?: string };
+    if (!responseBody.file) {
+      throw new Error(`Upload response missing 'file' field: ${JSON.stringify(responseBody)}`);
+    }
+
+    // L'API retourne un path relatif (style "/api/v1.0/documents/<id>/media-check/?key=...").
+    // On le concatène avec l'origin pour produire une URL absolue
+    // utilisable directement dans le bloc image.
+    // / API returns a relative path; concatenate with origin for abs URL.
+    const instanceOrigin = this.instanceStore.get()!;
+    return `${instanceOrigin}${responseBody.file}`;
+  }
+
+  /**
    * Persiste explicitement l'état Yjs d'un document dans le snapshot REST
    * (champ `content`, S3-backed). Imite ce que fait le frontend BlockNote
    * dans son save loop de 60s.

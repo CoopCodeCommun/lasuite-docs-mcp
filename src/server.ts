@@ -146,6 +146,17 @@ const deleteBlockInputSchema = z.intersection(
   z.object({ block_id: z.string() }),
 );
 
+const insertImageInputSchema = z.intersection(
+  documentReferenceSchema,
+  z.object({
+    image_data_base64: z.string().min(1),
+    file_name: z.string().min(1),
+    mime_type: z.string().optional(),
+    caption: z.string().optional(),
+    after_block_id: z.string().nullable().optional(),
+  }),
+);
+
 // -------- Helper : extraire (docId, settle instance si doc_url)
 function resolveDocumentReference(
   ref: { doc_id: string } | { doc_url: string },
@@ -240,6 +251,38 @@ const toolDefinitionList = [
       required: ['block_id'],
     },
   },
+  {
+    name: 'insert_image',
+    description: 'Upload une image et l\'insère comme bloc image dans le document. L\'image est fournie en base64 via `image_data_base64` (limite raisonnable ~5 Mo de base64). Le MCP fait un POST multipart vers /api/v1.0/documents/{id}/attachment-upload/ puis insère un bloc image BlockNote pointant vers l\'URL retournée. PERSISTANCE : comme insert_block (garantie en mode authentifié, best-effort en anonyme). PERMISSIONS : exige `attachment_upload` (équivalent `can_update`) côté Docs.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        doc_id: { type: 'string', format: 'uuid' },
+        doc_url: { type: 'string' },
+        image_data_base64: {
+          type: 'string',
+          description: 'Contenu binaire de l\'image encodé en base64 (sans préfixe data:). Formats supportés : ce que Docs accepte (PNG, JPEG, GIF, WebP, SVG typiquement).',
+        },
+        file_name: {
+          type: 'string',
+          description: 'Nom de fichier (avec extension) — utilisé pour la propriété `name` du bloc image et conservé côté storage. Ex: "diagramme.png".',
+        },
+        mime_type: {
+          type: 'string',
+          description: 'MIME type de l\'image (ex: "image/png"). Optionnel : si absent, déduit de l\'extension de file_name.',
+        },
+        caption: {
+          type: 'string',
+          description: 'Légende sous l\'image (optionnel).',
+        },
+        after_block_id: {
+          type: ['string', 'null'],
+          description: 'UUID d\'un bloc existant après lequel insérer l\'image. Si null/absent, insertion en tête.',
+        },
+      },
+      required: ['image_data_base64', 'file_name'],
+    },
+  },
   // v0.2 auth
   {
     name: 'set_session_credentials',
@@ -311,7 +354,7 @@ const toolDefinitionList = [
  */
 const MCP_INSTRUCTIONS = `# lasuite-docs-mcp — mode d'emploi
 
-Ce serveur expose 16 tools pour lire et éditer des documents la-suite Docs (instances type notes.numerique.gouv.fr, notes.liiib.re, etc.). Édition fine au niveau du paragraphe, compatible avec la collaboration temps réel des éditeurs humains.
+Ce serveur expose 17 tools pour lire et éditer des documents la-suite Docs (instances type notes.numerique.gouv.fr, notes.liiib.re, etc.). Édition fine au niveau du paragraphe, upload d'images, et co-édition temps réel avec les éditeurs humains.
 
 ## Workflows clés
 
@@ -345,6 +388,10 @@ Le serveur Hocuspocus de Docs n'a AUCUN mécanisme de persistance automatique. L
 - \`INSTANCE_NOT_SET\` : passe-moi un \`doc_url\` complet (https://<instance>/docs/<UUID>/) pour settle l'instance, ou définir DOCS_INSTANCE_URL côté config
 - \`INSTANCE_MISMATCH\` : tu cibles un autre serveur que celui actuellement settled — appelle clear_session_credentials d'abord
 
+## Images
+
+Le tool \`insert_image\` upload une image (en base64) vers le storage S3 du document, puis insère un bloc image BlockNote pointant vers l'URL retournée. Formats : PNG, JPEG, GIF, WebP, SVG. Taille raisonnable (~5 Mo de base64). Les images sont scannées par antivirus côté serveur — l'URL retournée est d'abord une URL de polling \`media-check\`, qui est automatiquement remplacée par l'URL S3 finale par BlockNote quand le scan termine. Tu peux donc utiliser l'URL tout de suite sans attendre.
+
 ## Markdown inline supporté
 
 Les paramètres \`text\` de \`insert_block\` et \`update_block\` sont interprétés comme du **markdown inline** :
@@ -362,7 +409,7 @@ Tu partages le même Y.Doc CRDT temps réel que les humains connectés au même 
 `;
 
 const mcpServer = new Server(
-  { name: 'lasuite-docs-mcp', version: '0.4.0' },
+  { name: 'lasuite-docs-mcp', version: '0.5.0' },
   { capabilities: { tools: {} }, instructions: MCP_INSTRUCTIONS },
 );
 
@@ -417,6 +464,41 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         await docsRestClient.assertPublicEditor(docId);
         await getSessionManager().deleteBlock(docId, input.block_id);
         return formatToolSuccess(withAnonymousPersistenceWarning({ ok: true }));
+      }
+      case 'insert_image': {
+        const input = insertImageInputSchema.parse(rawArgs);
+        const docId = resolveDocumentReference(input);
+        await docsRestClient.assertEditAccess(docId);
+        // Décode le base64 reçu de l'agent en buffer binaire avant
+        // l'upload multipart. Si le base64 est invalide, Buffer.from
+        // produit un buffer tronqué silencieusement — on accepte ce
+        // comportement (le serveur Docs validera côté antivirus/format).
+        // / Decode base64 from agent input. Invalid base64 produces a
+        // / truncated buffer silently — Docs server validates server-side.
+        const fileBuffer = Buffer.from(input.image_data_base64, 'base64');
+        const inferredMimeType =
+          input.mime_type ?? guessMimeTypeFromFileName(input.file_name);
+        const imageUrl = await docsRestClient.uploadAttachment(
+          docId,
+          fileBuffer,
+          input.file_name,
+          inferredMimeType,
+        );
+        const blockId = await getSessionManager().insertImageBlock(
+          docId,
+          {
+            url: imageUrl,
+            name: input.file_name,
+            caption: input.caption,
+          },
+          input.after_block_id ?? null,
+        );
+        return formatToolSuccess(
+          withAnonymousPersistenceWarning({
+            block_id: blockId,
+            image_url: imageUrl,
+          }),
+        );
       }
       case 'set_session_credentials': {
         const input = setSessionCredentialsInputSchema.parse(rawArgs);
@@ -571,6 +653,26 @@ function formatToolSuccess(payload: unknown) {
  * / In authenticated mode, SessionManager PATCHes /content/ after each
  * / write — persistence is then guaranteed server-side.
  */
+/**
+ * Devine le MIME type d'une image à partir de l'extension du nom de
+ * fichier. Volontairement minimaliste — on couvre les formats que les
+ * agents utiliseront en pratique (PNG, JPEG, GIF, WebP, SVG). Pour les
+ * cas exotiques, l'agent peut passer mime_type explicitement.
+ * / Minimal MIME type guesser from filename extension. Agent can override
+ * / via explicit mime_type for exotic formats.
+ */
+function guessMimeTypeFromFileName(fileName: string): string {
+  const lowerCaseName = fileName.toLowerCase();
+  if (lowerCaseName.endsWith('.png')) return 'image/png';
+  if (lowerCaseName.endsWith('.jpg') || lowerCaseName.endsWith('.jpeg')) return 'image/jpeg';
+  if (lowerCaseName.endsWith('.gif')) return 'image/gif';
+  if (lowerCaseName.endsWith('.webp')) return 'image/webp';
+  if (lowerCaseName.endsWith('.svg')) return 'image/svg+xml';
+  // Fallback générique. Le serveur Docs validera de toute façon.
+  // / Generic fallback. Docs server validates anyway.
+  return 'application/octet-stream';
+}
+
 function withAnonymousPersistenceWarning<T extends object>(
   payload: T,
 ): T | T & { warning: string } {

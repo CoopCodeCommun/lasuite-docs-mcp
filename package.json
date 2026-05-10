@@ -1,6 +1,6 @@
 {
   "name": "lasuite-docs-mcp",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "MCP server pour lire et éditer des documents la-suite Docs / MCP server to read and edit la-suite Docs documents",
   "license": "MIT",
   "type": "module",
