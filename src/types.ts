@@ -66,7 +66,8 @@ export type DocsErrorCode =
   | 'DOC_READONLY'
   | 'BLOCK_NOT_FOUND'
   | 'UNSUPPORTED_BLOCK_TYPE'
-  | 'SYNC_TIMEOUT';
+  | 'SYNC_TIMEOUT'
+  | 'INVALID_INPUT';
 
 // Erreur métier dédiée pour le routage côté MCP.
 // / Dedicated business error for MCP-side routing.

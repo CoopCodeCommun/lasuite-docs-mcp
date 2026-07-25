@@ -20,6 +20,8 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
+import { promises as fs } from 'node:fs';
+import path from 'node:path';
 import { SessionManager } from './docs/session.js';
 import { DocsRestClient } from './docs/client.js';
 import { CredentialsStore } from './auth/credentials.js';
@@ -153,23 +155,56 @@ const deleteBlockInputSchema = z.intersection(
 // directement via le navigateur.
 // / Cap on image_data_base64 size. 10 MB base64 ≈ 7.5 MB binary.
 const MAX_IMAGE_BASE64_BYTES = 10 * 1024 * 1024;
+// Borne équivalente côté binaire (mode image_path). 10 Mo de base64 ≈ 7.5 Mo
+// binaire — on garde la même limite effective entre les deux modes.
+// / Equivalent binary cap for image_path mode (same effective limit).
+const MAX_IMAGE_BINARY_BYTES = Math.floor((MAX_IMAGE_BASE64_BYTES * 3) / 4);
 
-const insertImageInputSchema = z.intersection(
-  documentReferenceSchema,
-  z.object({
-    image_data_base64: z
-      .string()
-      .min(1, 'image_data_base64 ne peut pas être vide')
-      .max(
-        MAX_IMAGE_BASE64_BYTES,
-        `image_data_base64 dépasse la limite de ${MAX_IMAGE_BASE64_BYTES} caractères (~7.5 Mo binaire). Redimensionne l'image avant upload.`,
-      ),
-    file_name: z.string().min(1),
-    mime_type: z.string().optional(),
-    caption: z.string().optional(),
-    after_block_id: z.string().nullable().optional(),
-  }),
-);
+const insertImageInputSchema = z
+  .intersection(
+    documentReferenceSchema,
+    z.object({
+      image_data_base64: z
+        .string()
+        .min(1, 'image_data_base64 ne peut pas être vide')
+        .max(
+          MAX_IMAGE_BASE64_BYTES,
+          `image_data_base64 dépasse la limite de ${MAX_IMAGE_BASE64_BYTES} caractères (~7.5 Mo binaire). Redimensionne l'image avant upload.`,
+        )
+        .optional(),
+      image_path: z
+        .string()
+        .min(1)
+        .refine(
+          (value) => path.isAbsolute(value),
+          'image_path doit être un chemin absolu (ex: /home/user/foo.png).',
+        )
+        .optional(),
+      file_name: z.string().min(1).optional(),
+      mime_type: z.string().optional(),
+      caption: z.string().optional(),
+      after_block_id: z.string().nullable().optional(),
+    }),
+  )
+  .refine(
+    (data) => {
+      const hasBase64 = data.image_data_base64 !== undefined;
+      const hasPath = data.image_path !== undefined;
+      return hasBase64 !== hasPath;
+    },
+    {
+      message:
+        'Fournis exactement UN des deux : `image_path` (chemin absolu vers le fichier local — recommandé pour les fichiers sur disque, économise du contexte) OU `image_data_base64` (image en base64 inline, pour les images qui ne sont pas sur le disque).',
+    },
+  )
+  .refine(
+    (data) =>
+      data.image_path !== undefined || data.file_name !== undefined,
+    {
+      message:
+        'file_name est requis quand tu utilises image_data_base64 (avec image_path, le basename du chemin est utilisé par défaut).',
+    },
+  );
 
 // -------- Helper : extraire (docId, settle instance si doc_url)
 function resolveDocumentReference(
@@ -267,23 +302,27 @@ const toolDefinitionList = [
   },
   {
     name: 'insert_image',
-    description: 'Upload une image et l\'insère comme bloc image dans le document. L\'image est fournie en base64 via `image_data_base64` (limite raisonnable ~5 Mo de base64). Le MCP fait un POST multipart vers /api/v1.0/documents/{id}/attachment-upload/ puis insère un bloc image BlockNote pointant vers l\'URL retournée. PERSISTANCE : comme insert_block (garantie en mode authentifié, best-effort en anonyme). PERMISSIONS : exige `attachment_upload` (équivalent `can_update`) côté Docs.',
+    description: 'Upload une image et l\'insère comme bloc image dans le document. **Deux modes exclusifs** : (1) `image_path` — chemin ABSOLU vers un fichier local (ex: "/home/user/photo.png"). PRIVILÉGIE CE MODE pour les fichiers sur disque : le MCP lit le fichier lui-même, ZÉRO base64 ne transite par ton contexte (économie massive sur des batches de plusieurs images). (2) `image_data_base64` — image inline en base64 (sans préfixe data:). À utiliser UNIQUEMENT quand l\'image n\'est pas un fichier sur disque (capture, fetch web, image générée en RAM). Le MCP fait un POST multipart vers /api/v1.0/documents/{id}/attachment-upload/ puis insère un bloc image BlockNote pointant vers l\'URL retournée. Formats : PNG, JPEG, GIF, WebP, SVG. Limite : ~7.5 Mo binaire. PERSISTANCE : comme insert_block (garantie en mode authentifié, best-effort en anonyme). PERMISSIONS : exige `attachment_upload` (équivalent `can_update`) côté Docs.',
     inputSchema: {
       type: 'object',
       properties: {
         doc_id: { type: 'string', format: 'uuid' },
         doc_url: { type: 'string' },
+        image_path: {
+          type: 'string',
+          description: 'Chemin **absolu** vers le fichier image sur le disque local (ex: "/home/user/foo.png"). Mode recommandé pour les fichiers locaux — le MCP lit le fichier lui-même, ce qui économise ton contexte (aucun base64 ne transite). Exclusif avec `image_data_base64`.',
+        },
         image_data_base64: {
           type: 'string',
-          description: 'Contenu binaire de l\'image encodé en base64 (sans préfixe data:). Formats supportés : ce que Docs accepte (PNG, JPEG, GIF, WebP, SVG typiquement).',
+          description: 'Contenu binaire de l\'image encodé en base64 (sans préfixe data:). À utiliser UNIQUEMENT quand l\'image n\'est pas un fichier sur disque. Pour un fichier local, utilise `image_path` à la place. Exclusif avec `image_path`.',
         },
         file_name: {
           type: 'string',
-          description: 'Nom de fichier (avec extension) — utilisé pour la propriété `name` du bloc image et conservé côté storage. Ex: "diagramme.png".',
+          description: 'Nom de fichier (avec extension) — utilisé pour la propriété `name` du bloc image et côté storage. Ex: "diagramme.png". REQUIS avec `image_data_base64`. Optionnel avec `image_path` (le basename du chemin est utilisé par défaut).',
         },
         mime_type: {
           type: 'string',
-          description: 'MIME type de l\'image (ex: "image/png"). Optionnel : si absent, déduit de l\'extension de file_name.',
+          description: 'MIME type de l\'image (ex: "image/png"). Optionnel : déduit de l\'extension du file_name (ou du image_path) si absent.',
         },
         caption: {
           type: 'string',
@@ -294,7 +333,7 @@ const toolDefinitionList = [
           description: 'UUID d\'un bloc existant après lequel insérer l\'image. Si null/absent, insertion en tête.',
         },
       },
-      required: ['image_data_base64', 'file_name'],
+      required: [],
     },
   },
   // v0.2 auth
@@ -404,7 +443,14 @@ Le serveur Hocuspocus de Docs n'a AUCUN mécanisme de persistance automatique. L
 
 ## Images
 
-Le tool \`insert_image\` upload une image (en base64) vers le storage S3 du document, puis insère un bloc image BlockNote pointant vers l'URL retournée. Formats : PNG, JPEG, GIF, WebP, SVG. Taille raisonnable (~5 Mo de base64). Les images sont scannées par antivirus côté serveur — l'URL retournée est d'abord une URL de polling \`media-check\`, qui est automatiquement remplacée par l'URL S3 finale par BlockNote quand le scan termine. Tu peux donc utiliser l'URL tout de suite sans attendre.
+Le tool \`insert_image\` upload une image vers le storage du document, puis insère un bloc image BlockNote.
+
+**Deux modes, à choisir selon où se trouve l'image** :
+
+- **\`image_path\` (chemin absolu, RECOMMANDÉ pour fichiers locaux)** : ex \`/home/user/photo.png\`. Le MCP lit le fichier lui-même → ZÉRO base64 ne transite par ton contexte. Pour un batch de 10+ images, c'est la seule option viable côté tokens. ⚠️ NE LIS JAMAIS le fichier toi-même pour repasser ensuite son contenu en \`image_data_base64\` — c'est exactement ce que ce mode évite.
+- **\`image_data_base64\`** : image inline en base64. À utiliser UNIQUEMENT quand l'image n'est pas un fichier sur disque (capture, fetch web, génération en RAM).
+
+Formats : PNG, JPEG, GIF, WebP, SVG. Limite : ~7.5 Mo binaire (~10 Mo base64). Les images sont scannées par antivirus côté serveur — l'URL retournée est d'abord une URL de polling \`media-check\`, qui est automatiquement remplacée par l'URL S3 finale par BlockNote quand le scan termine. Tu peux donc utiliser l'URL tout de suite sans attendre.
 
 ## Markdown inline supporté
 
@@ -412,14 +458,33 @@ Les paramètres \`text\` de \`insert_block\` et \`update_block\` sont interprét
 - \`**gras**\`, \`*italique*\`, \`\`\`code\`\`\`, \`~~barré~~\`, \`[texte](url)\`
 - \`read_document\` retourne le contenu en markdown : tu peux lire un bloc, modifier la chaîne, la réinjecter via update_block sans perte (round-trip propre).
 
-## Co-édition live
+## Co-édition live (humain ↔ agent ↔ agent)
 
-Tu partages le même Y.Doc CRDT temps réel que les humains connectés au même doc dans leur navigateur :
-- Tes \`insert_block\` apparaissent **instantanément** dans le navigateur de l'utilisateur connecté.
-- Les frappes humaines sont visibles au prochain \`read_document\` de ta part.
-- Conflits gérés automatiquement par le CRDT — pas d'écrasement.
+Tu partages le même Y.Doc CRDT temps réel avec **tous les autres clients connectés** au doc — humains dans leur navigateur, et autres agents IA via leur propre MCP.
 
-→ Cas d'usage typique : « rédige la section X pendant que je tape la section Y » sur le même doc.
+- Tes \`insert_block\` / \`update_block\` / \`delete_block\` apparaissent **instantanément** chez les humains connectés et chez les autres agents qui font un \`read_document\`.
+- Les modifs des autres (humains ou agents) sont visibles dans ton prochain \`read_document\`.
+- **Conflits gérés automatiquement par le CRDT** — personne n'écrase personne, même en cas d'édition simultanée du même paragraphe.
+
+**Plusieurs agents en parallèle** : un autre agent IA peut éditer le même doc en même temps que toi (instances Claude Desktop / Code / OpenCode séparées). En mode authentifié, vous voyez chacun les écritures de l'autre via la WebSocket Hocuspocus, et chaque PATCH \`/content/\` que vous faites inclut les changements des autres reçus entre temps. Tu peux te coordonner explicitement avec l'utilisateur si tu veux une répartition propre (« je fais la section 1, l'autre agent fait la section 2 »).
+
+**Sous-documents** : trivialement parallèles. Un sous-doc est un Document distinct côté serveur (UUID séparé), donc un agent qui édite un parent et un autre qui édite un enfant ne se gênent pas.
+
+**Pas besoin d'un client navigateur ouvert** : le PATCH \`/content/\` automatique après chaque write garantit la persistance côté serveur, indépendamment de la présence humaine — *en mode authentifié seulement*.
+
+→ Cas d'usage typique : « rédige la section X pendant que je tape la section Y » (humain↔agent), ou « cet agent rédige le doc principal pendant que cet autre prépare les sous-docs » (agent↔agent).
+
+## Détecter et signaler les problèmes
+
+Le MCP te remonte des erreurs claires via les codes \`code\` listés plus haut. Voici comment réagir et **prévenir l'utilisateur** :
+
+- **\`AUTH_REQUIRED\`** : explique à l'utilisateur que ses cookies ont expiré ou qu'il faut s'authentifier. Le message d'erreur contient le tutoriel pas-à-pas pour récupérer \`docs_sessionid\` + \`csrftoken\` via DevTools — recopie-le ou résume-le.
+- **\`PERMISSION_DENIED\`** : les cookies sont valides mais l'utilisateur n'a pas le droit pour CETTE op précise sur CE doc. Le message inclut le \`detail\` Django si présent. Indique clairement à l'utilisateur qu'il doit vérifier ses droits, ou faire l'op lui-même via le navigateur.
+- **\`SYNC_TIMEOUT\` ou \`BLOCK_NOT_FOUND\` après une op** : possible qu'un autre agent ou un humain ait modifié/supprimé le bloc juste avant toi. Fais un \`read_document\` pour ré-aligner ta vision sur l'état réel, puis adapte. Préviens l'utilisateur si ça interfère avec ce qu'il t'a demandé.
+- **Le champ \`warning\` anonyme** dans la sortie de tes writes en mode anonyme : **transmets-le textuellement à l'utilisateur**. C'est le seul moyen pour lui de savoir qu'il faut garder son onglet ouvert pour que tes modifs survivent.
+- **Comportement bizarre persistant** (tu lis un état qui ne ressemble pas à ce que l'utilisateur dit voir) : c'est anormal. Demande à l'utilisateur de confirmer le contenu côté navigateur, et signale-lui les blocs que tu vois — ça permet de diagnostiquer (cookies sur la mauvaise instance, doc déplacé, etc.).
+
+**Règle générale** : ne tente pas de masquer une erreur — propage-la à l'utilisateur en français clair, avec ce que tu sais (code, message, action conseillée). L'utilisateur peut quasi toujours débloquer la situation lui-même si tu lui dis quoi faire.
 `;
 
 const mcpServer = new Server(
@@ -485,11 +550,19 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         //
         // LOCALISATION : src/server.ts (case 'insert_image')
         //
+        // DEUX MODES D'ENTRÉE EXCLUSIFS :
+        //   - image_path : chemin absolu sur le disque local. Le MCP lit
+        //     le fichier lui-même → aucun base64 ne transite par le
+        //     contexte de l'agent. Mode recommandé pour les fichiers
+        //     locaux, surtout en batch.
+        //   - image_data_base64 : image inline en base64 (capture, fetch
+        //     web, image générée en RAM).
+        //
         // FLUX :
-        // 1. Valide l'input (zod). Borne haute MAX_IMAGE_BASE64_BYTES.
+        // 1. Valide l'input (zod) — XOR entre image_path et image_data_base64.
         // 2. Résout doc_id ou doc_url (settle l'instance si besoin).
         // 3. Vérifie l'accès en édition via assertEditAccess (REST).
-        // 4. Décode le base64 en buffer binaire.
+        // 4. Charge le buffer binaire (lecture fichier OU décodage base64).
         // 5. Devine le MIME type si non fourni (extension du file_name).
         // 6. Upload via DocsRestClient.uploadAttachment (POST multipart) →
         //    URL absolue media-check (polling antivirus).
@@ -498,7 +571,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         // 8. Retourne {block_id, image_url}, plus warning si anonyme.
         //
         // COMMUNICATION :
-        // Reçoit : appel MCP de l'agent avec image en base64.
+        // Reçoit : appel MCP de l'agent (image_path ou image_data_base64).
         // Émet :
         //   - REST : POST /api/v1.0/documents/{id}/attachment-upload/
         //   - REST : PATCH /api/v1.0/documents/{id}/ (persistance content)
@@ -508,21 +581,61 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
         const docId = resolveDocumentReference(input);
         await docsRestClient.assertEditAccess(docId);
 
-        // Décode le base64 reçu de l'agent en buffer binaire avant
-        // l'upload multipart. Si le base64 est invalide, Buffer.from
-        // produit un buffer tronqué silencieusement — on accepte ce
-        // comportement (le serveur Docs validera côté antivirus/format
-        // et renverra une erreur HTTP qu'on remontera à l'agent).
-        // / Decode base64 from agent input. Invalid base64 → truncated
-        // / buffer silently — Docs server validates and returns an error.
-        const fileBuffer = Buffer.from(input.image_data_base64, 'base64');
+        let fileBuffer: Buffer;
+        let resolvedFileName: string;
+
+        if (input.image_path !== undefined) {
+          // Mode image_path : le MCP lit le fichier lui-même, l'agent
+          // n'a jamais à charger le base64 dans son contexte. Le zod
+          // refinement a déjà vérifié que le chemin est absolu.
+          // / image_path mode: MCP reads the file itself, agent never
+          // / carries base64 in its context. Absolute path already
+          // / enforced by zod refinement.
+          let stat;
+          try {
+            stat = await fs.stat(input.image_path);
+          } catch (caught) {
+            const errCode = (caught as NodeJS.ErrnoException).code ?? 'unknown';
+            throw new DocsError(
+              'INVALID_INPUT',
+              `Fichier image introuvable ou illisible : ${input.image_path} (${errCode})`,
+            );
+          }
+          if (!stat.isFile()) {
+            throw new DocsError(
+              'INVALID_INPUT',
+              `image_path ne pointe pas vers un fichier régulier : ${input.image_path}`,
+            );
+          }
+          if (stat.size > MAX_IMAGE_BINARY_BYTES) {
+            throw new DocsError(
+              'INVALID_INPUT',
+              `Le fichier ${input.image_path} fait ${stat.size} octets, au-dessus de la limite de ${MAX_IMAGE_BINARY_BYTES} octets (~7.5 Mo). Redimensionne avant upload.`,
+            );
+          }
+          fileBuffer = await fs.readFile(input.image_path);
+          resolvedFileName = input.file_name ?? path.basename(input.image_path);
+        } else {
+          // Mode image_data_base64 : décodage direct. Si le base64 est
+          // invalide, Buffer.from produit un buffer tronqué silencieusement
+          // — on accepte ce comportement (le serveur Docs validera côté
+          // antivirus/format et renverra une erreur HTTP qu'on remontera).
+          // Le zod refinement garantit que image_data_base64 et file_name
+          // sont définis dans cette branche.
+          // / image_data_base64 mode: direct decode. Invalid base64 →
+          // / truncated buffer silently — Docs server validates and
+          // / surfaces format errors via HTTP.
+          fileBuffer = Buffer.from(input.image_data_base64!, 'base64');
+          resolvedFileName = input.file_name!;
+        }
+
         const inferredMimeType =
-          input.mime_type ?? guessMimeTypeFromFileName(input.file_name);
+          input.mime_type ?? guessMimeTypeFromFileName(resolvedFileName);
 
         const imageUrl = await docsRestClient.uploadAttachment(
           docId,
           fileBuffer,
-          input.file_name,
+          resolvedFileName,
           inferredMimeType,
         );
 
@@ -530,7 +643,7 @@ mcpServer.setRequestHandler(CallToolRequestSchema, async (request) => {
           docId,
           {
             url: imageUrl,
-            name: input.file_name,
+            name: resolvedFileName,
             caption: input.caption,
           },
           input.after_block_id ?? null,

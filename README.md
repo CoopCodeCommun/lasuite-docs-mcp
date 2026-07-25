@@ -46,7 +46,7 @@ Le serveur Hocuspocus de Docs **n'a aucun mécanisme de persistance automatique*
 | `insert_block` | Insère un paragraphe ou heading. Le `text` est interprété comme du **markdown inline** (gras, italique, code, strike, liens) |
 | `update_block` | Modifie le texte d'un bloc existant. Idem : markdown inline supporté |
 | `delete_block` | Supprime un bloc |
-| `insert_image` | Upload une image (base64) sur le storage du doc et insère un bloc image. Formats supportés : PNG, JPEG, GIF, WebP, SVG. |
+| `insert_image` | Upload une image sur le storage du doc et insère un bloc image. **Deux modes** : `image_path` (chemin absolu local — recommandé, le MCP lit le fichier, économise le contexte de l'agent) ou `image_data_base64` (image inline pour capture/fetch). Formats : PNG, JPEG, GIF, WebP, SVG. |
 
 **Format markdown supporté** sur les paramètres `text` de `insert_block` et `update_block` :
 
@@ -96,7 +96,7 @@ Vérification rapide après build :
 echo '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | node dist/server.js | head -c 300
 ```
 
-Doit retourner un JSON-RPC listant les 16 tools.
+Doit retourner un JSON-RPC listant les 17 tools.
 
 ## Configuration
 
@@ -139,14 +139,18 @@ claude mcp add --transport stdio --scope user lasuite-docs \
   -- node /chemin/absolu/vers/lasuite-docs-mcp/dist/server.js
 
 # Avec une instance par défaut
-claude mcp add --transport stdio --scope user \
-  --env DOCS_INSTANCE_URL=https://notes.liiib.re \
-  lasuite-docs -- node /chemin/absolu/vers/lasuite-docs-mcp/dist/server.js
+claude mcp add lasuite-docs --transport stdio --scope user \
+  -e DOCS_INSTANCE_URL=https://notes.liiib.re \
+  -- node /chemin/absolu/vers/lasuite-docs-mcp/dist/server.js
 
 # Limité à un projet précis (créera .mcp.json à la racine du projet)
 claude mcp add --transport stdio --scope project lasuite-docs \
   -- node /chemin/absolu/vers/lasuite-docs-mcp/dist/server.js
 ```
+
+> ⚠️ **L'ordre des arguments compte.** L'option `-e/--env` accepte plusieurs valeurs : place le nom
+> du serveur **avant** elle, sinon la CLI prend ce nom pour une variable d'environnement et échoue
+> avec `Invalid environment variable format: lasuite-docs`.
 
 Ou directement en JSON dans `~/.claude.json` (user) ou `.mcp.json` (project) :
 
